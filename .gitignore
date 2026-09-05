@@ -1,0 +1,23 @@
+# Output workbooks. Never commit a report: it contains object names from a real tenant.
+*.xlsx
+*.xls
+
+# Saved settings. Holds tenant and client IDs.
+settings.json
+*.settings.json
+
+# Local scratch
+scratch/
+tmp/
+*.log
+
+# Editors
+.vscode/
+.idea/
+*.suo
+*.user
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store

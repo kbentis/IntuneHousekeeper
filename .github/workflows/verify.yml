@@ -1,0 +1,108 @@
+name: Verify
+
+# Enforces the hard constraints in AGENTS.md. Everything here runs offline: no tenant,
+# no credentials, no Graph calls.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ASCII only
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path . -Recurse -File |
+                   Where-Object { $_.Extension -in '.ps1', '.psm1', '.psd1', '.ps1xml', '.xaml' }
+          $bad = @()
+          foreach ($f in $files) {
+            $n = 0
+            foreach ($b in [System.IO.File]::ReadAllBytes($f.FullName)) { if ($b -gt 127) { $n++ } }
+            if ($n -gt 0) { $bad += ('{0}: {1} non-ASCII byte(s)' -f $f.FullName, $n) }
+          }
+          if ($bad.Count -gt 0) {
+            $bad | ForEach-Object { Write-Host "::error::$_" }
+            exit 1
+          }
+          Write-Host ('ASCII check passed over {0} file(s).' -f $files.Count)
+
+      - name: Read-only (no non-GET Graph calls)
+        shell: pwsh
+        run: |
+          # The safety property of this tool is that running it cannot change anything.
+          # Any -Method other than GET fails the build.
+          $hits = Select-String -Path .\*.ps1, .\*.psm1 -Pattern '-Method\s+(\w+)' -AllMatches -ErrorAction SilentlyContinue
+          $bad = @()
+          foreach ($h in $hits) {
+            foreach ($m in $h.Matches) {
+              if ($m.Groups[1].Value -ne 'GET') {
+                $bad += ('{0}:{1} uses -Method {2}' -f $h.Filename, $h.LineNumber, $m.Groups[1].Value)
+              }
+            }
+          }
+          if ($bad.Count -gt 0) {
+            $bad | ForEach-Object { Write-Host "::error::$_" }
+            exit 1
+          }
+          Write-Host ('Read-only check passed. {0} Graph call site(s), all GET.' -f $hits.Count)
+
+      - name: Parse (PowerShell 7)
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($f in (Get-ChildItem -Path . -Recurse -File -Include *.ps1, *.psm1)) {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors)
+            if ($errors) {
+              $failed = $true
+              $errors | ForEach-Object { Write-Host ('::error file={0},line={1}::{2}' -f $f.FullName, $_.Extent.StartLineNumber, $_.Message) }
+            }
+          }
+          if ($failed) { exit 1 }
+          Write-Host 'Parses clean under PowerShell 7.'
+
+      - name: Parse (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $failed = $false
+          foreach ($f in (Get-ChildItem -Path . -Recurse -File -Include *.ps1, *.psm1)) {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors)
+            if ($errors) {
+              $failed = $true
+              $errors | ForEach-Object { Write-Host ('::error file={0},line={1}::{2}' -f $f.FullName, $_.Extent.StartLineNumber, $_.Message) }
+            }
+          }
+          if ($failed) { exit 1 }
+          Write-Host 'Parses clean under Windows PowerShell 5.1.'
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck -ErrorAction Stop
+          $settings = @{
+            Rules = @{
+              PSUseCompatibleSyntax = @{
+                Enable         = $true
+                TargetVersions = @('5.1', '7.0')
+              }
+            }
+          }
+          $results = Invoke-ScriptAnalyzer -Path . -Recurse -Settings $settings
+          if ($results) {
+            $results | Format-Table -AutoSize | Out-String | Write-Host
+          }
+          # Warnings are reported but do not fail the build. Errors do.
+          $errors = @($results | Where-Object Severity -eq 'Error')
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host ('::error file={0},line={1}::{2}' -f $_.ScriptPath, $_.Line, $_.Message) }
+            exit 1
+          }
+          Write-Host ('PSScriptAnalyzer: {0} warning(s), 0 error(s).' -f @($results).Count)
