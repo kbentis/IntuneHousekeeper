@@ -1,3 +1,5 @@
+#Requires -Version 7.0
+
 <#
 .SYNOPSIS
     Intune Housekeeper. Read-only inventory of unassigned, mis-assigned and leftover
@@ -49,12 +51,24 @@
                               Cross-intent (exclude Required / include Uninstall) is
                               a normal app pattern and is not flagged.
       SupersededByNewer       (apps) a newer version supersedes this one
+      SupersededByName        (apps) unassigned, but a newer version of the same
+                              application is assigned. Matched on display name and
+                              version, for workflows that do not create supersedence
+      RetainedVersionExpired  (apps) SupersededByName, but created more than
+                              -RetainedVersionMonths ago. The rollback window has
+                              passed, so it returns to the cleanup queue
       HasDependents           (apps) another app depends on this one
       RecentlyCreated         (apps) unassigned but created within the last -NewAppGraceMonths
 
     Group flags:
       ZeroMembers             group has 0 direct members
-      NotUsedInIntune         group ID is not referenced by any Windows Intune assignment
+      NotUsedInIntune         group ID is not referenced by any assignment found. All
+                              platforms count, and assignments are also read from object
+                              types outside the report (macOS shell and custom attribute
+                              scripts, Autopilot, enrolment configurations, update rings,
+                              app configuration and app protection policies) purely to
+                              establish references. Still verify in the portal: any
+                              object type Microsoft adds is invisible until added here
 
 .PARAMETER ClientId
     Client ID of your own Entra app registration (public client / native flow enabled).
@@ -70,6 +84,15 @@
     months is flagged RecentlyCreated, set to Watch and left out of the worklist and the
     actionable counts. Set it to the age of the newest version you expect to retain, or
     to 0 to flag every unassigned app regardless of creation date.
+
+.PARAMETER RetainedVersionMonths
+    How long a retained previous version stays out of the cleanup queue. An unassigned
+    app with a newer assigned version of the same name is kept at Low while it is newer
+    than this, and returns to Medium beyond it, flagged RetainedVersionExpired. Set it
+    to how long a rollback is realistically useful in your environment, or to 0 to
+    disable the leniency and queue every retained copy. Applies only to name-matched
+    copies: a real Intune supersedence relationship is always kept, because the newer
+    app's configuration depends on it.
 
 .PARAMETER TestNameRegex
     Regex identifying a test object by display name, in your own naming convention.
@@ -165,6 +188,11 @@
     broker redirect URI above. The device must also be joined or registered and
     compliant, or token protection fails regardless.
 
+    An existing Graph session for the same tenant and client ID is reused rather than
+    replaced, and only a session this script opened is disconnected at the end. Running
+    the script repeatedly therefore costs one sign-in, not one per run, which matters
+    under Conditional Access token protection where every sign-in is a broker prompt.
+
     -Scopes is deliberately not passed to Connect-MgGraph. With a custom -ClientId, MSAL
     treats requested scopes as a new authorization and triggers a consent prompt; the
     token must carry what is already consented on the app registration. The script
@@ -174,8 +202,14 @@
       Microsoft.Graph.Authentication
       ImportExcel                     (does not require Excel to be installed)
 
-    Windows only: broker sign-in and the header styling both depend on Windows.
-    Windows PowerShell 5.1 and PowerShell 7 on Windows are both supported.
+    Windows and PowerShell 7. Windows PowerShell 5.1 is not supported: .NET Framework
+    allows one Microsoft.Identity.Client per process with no isolation, so an admin
+    workstation carrying several Microsoft.Graph module versions fails at sign-in with
+    'Could not load type ... Microsoft.Identity.Client'. PowerShell 7 loads the SDK
+    dependencies in an isolated context and does not have this problem.
+
+    A read-only app registration is recommended. The tool only issues GET, but a
+    registration consented for ReadWrite holds a token that could change your tenant.
 
     ASCII-only file. No non-ASCII characters anywhere (no em-dashes, no smart quotes).
     Read-only: no PATCH, POST or DELETE calls are made against Graph.
@@ -210,6 +244,13 @@ param(
     [ValidateRange(0, 120)]
     [int]      $NewAppGraceMonths  = 6,
 
+    # How long a name-matched previous version is still worth keeping for rollback.
+    # Beyond this it is flagged RetainedVersionExpired and returns to the cleanup queue:
+    # a rollback copy nobody has needed in a year is not a rollback copy any more.
+    # 0 disables the leniency entirely, so every name-matched copy stays in the queue.
+    [ValidateRange(0, 120)]
+    [int]      $RetainedVersionMonths = 12,
+
     # There is no default naming convention, so the completer offers the common shapes
     # already quoted correctly. A pattern like -TEST$ must be single-quoted: in double
     # quotes PowerShell tries to expand the $ sequence.
@@ -218,7 +259,7 @@ param(
         $suggestions = @(
             @{ Pattern = '-TEST$';                  Tip = 'Suffix: Wifi-TEST' }
             @{ Pattern = '^TEST[-_]';               Tip = 'Prefix: TEST-Wifi or TEST_Wifi' }
-            @{ Pattern = '(^|[-_ ])TEST([-_ ]|$)';  Tip = 'Either position, on a word boundary' }
+            @{ Pattern = '(^|[-_ (\[])TEST([-_ )\]]|$)'; Tip = 'Any position, word boundary. Does not match Latest or Attestation' }
             @{ Pattern = '\(test\)$';               Tip = 'Bracketed suffix: Wifi (test)' }
         )
         $w = ([string]$wordToComplete).Trim("'").Trim('"')
@@ -237,6 +278,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $script:AllReferencedGroupIds = [System.Collections.Generic.HashSet[string]]::new()
+
+# Set when any Graph GET fails. A partial collection makes 'this group is referenced by
+# nothing' unsafe to assert, so the Entra group section is skipped when it is true.
+$script:GraphReadIncomplete = $false
+
+# A test pattern that matches nothing produces a report with no test findings, which
+# reads as 'you have no leftover test objects' rather than 'your pattern is wrong'.
+# Counting matches makes the difference visible at the end of the run.
+# True only when this script established the Graph session, so a session the operator
+# opened themselves is never closed underneath them.
+$script:ConnectionOwned  = $false
+$script:ObjectsExamined  = 0
+$script:TestNameMatches  = 0
 
 # Fail early on a malformed pattern rather than part way through the inventory. An empty
 # -TestNameRegex is valid and means the operator has not supplied a naming convention,
@@ -260,6 +314,7 @@ function Invoke-GraphPaged {
         }
         catch {
             Write-Warning ("Graph GET failed for {0}: {1}" -f $next, $_.Exception.Message)
+            $script:GraphReadIncomplete = $true
             break
         }
         if ($resp.PSObject.Properties.Name -contains 'value') {
@@ -277,6 +332,94 @@ function Invoke-GraphPaged {
 function Add-ReferencedGroup {
     param($GroupId)
     if ($GroupId) { [void]$script:AllReferencedGroupIds.Add([string]$GroupId) }
+}
+
+function Add-AssignmentGroupReference {
+    # Records every group ID an assignment collection targets. Called on the RAW result
+    # of each endpoint, before the Windows filter, so a group used only by a macOS, iOS,
+    # Android or Linux object is still counted as referenced. Reporting stays Windows
+    # only; referencing must not, or the group section recommends removing groups that
+    # are deploying software on another platform.
+    param($Assignments)
+    if (-not $Assignments) { return }
+    foreach ($a in $Assignments) {
+        if ($a.target -and ($a.target.PSObject.Properties.Name -contains 'groupId')) {
+            Add-ReferencedGroup $a.target.groupId
+        }
+    }
+}
+
+# Endpoints this tool does not report on, but whose assignments still reference groups.
+# Confirmed necessary in a live tenant: a group targeted only by a macOS shell script was
+# reported as referenced by nothing, with a suggested action against it. Reporting stays
+# Windows only; the referenced-group set has to be tenant wide or the group section
+# recommends action on groups that are deploying something.
+$script:ReferenceOnlyEndpoints = @(
+    'deviceManagement/deviceShellScripts'
+    'deviceManagement/deviceCustomAttributeShellScripts'
+    'deviceManagement/windowsAutopilotDeploymentProfiles'
+    'deviceManagement/deviceEnrollmentConfigurations'
+    'deviceManagement/windowsFeatureUpdateProfiles'
+    'deviceManagement/windowsQualityUpdateProfiles'
+    'deviceManagement/windowsDriverUpdateProfiles'
+    'deviceAppManagement/mobileAppConfigurations'
+    'deviceAppManagement/targetedManagedAppConfigurations'
+    'deviceAppManagement/iosManagedAppProtections'
+    'deviceAppManagement/androidManagedAppProtections'
+    'deviceAppManagement/windowsManagedAppProtections'
+)
+
+function Add-ReferenceOnlyGroups {
+    # Only worth the calls when the Entra group section is actually going to run. A
+    # failure here marks the collection incomplete, which skips that section: a partial
+    # reference set makes 'nothing references this group' unsafe to assert.
+    Write-Host 'Collecting group references from object types outside the report...'
+    foreach ($e in $script:ReferenceOnlyEndpoints) {
+        $objects = Invoke-GraphPaged -Uri ("https://graph.microsoft.com/beta/{0}?`$expand=assignments" -f $e)
+        foreach ($o in $objects) { Add-AssignmentGroupReference $o.assignments }
+    }
+}
+
+function Get-AppVersion {
+    # Last dotted-numeric token in a display name, as [version]. Null when there is none.
+    param([string]$Name)
+    if (-not $Name) { return $null }
+    $m = [regex]::Matches([string]$Name, '\d+(\.\d+)+')
+    if ($m.Count -eq 0) { return $null }
+    try { return [version]$m[$m.Count - 1].Value } catch { return $null }
+}
+
+function Test-SupersededByName {
+    # True when an unassigned application looks like a retained previous version: its
+    # name carries a version, and some other app shares its base name with BOTH a higher
+    # version AND a live inclusion assignment. All three conditions are required, so two
+    # unassigned versions of a retired app are not demoted.
+    param(
+        [string]$DisplayName,
+        [string]$Id,
+        $Index
+    )
+    $thisVer = Get-AppVersion $DisplayName
+    if (-not $thisVer) { return $false }
+    $thisBase = Get-AppBaseName $DisplayName
+    foreach ($cand in $Index) {
+        if ([string]$cand.Id -eq [string]$Id) { continue }
+        if (-not $cand.HasInclusion)          { continue }
+        if ($cand.Base -ne $thisBase)         { continue }
+        if ($cand.Version -and $cand.Version -gt $thisVer) { return $true }
+    }
+    return $false
+}
+
+function Get-AppBaseName {
+    # Display name with dotted-numeric tokens removed, so 'App 1.2.3 (x64)' and
+    # 'App 1.3.0 (x64)' share a base. Architecture and edition markers survive, because
+    # they contain no dotted number, which keeps x64 and x86 packages distinct.
+    param([string]$Name)
+    $b = [string]$Name
+    $b = $b -replace '\d+(\.\d+)+', ' '
+    $b = $b -replace '\s+', ' '
+    return $b.Trim()
 }
 
 function Get-AssignmentInfo {
@@ -377,7 +520,9 @@ function New-InventoryRow {
 
     # Test-object detection is opt-in. An empty pattern must never be passed to -match:
     # it matches every string, which would flag the entire estate as test objects.
+    $script:ObjectsExamined++
     if ($TestNameRegex -and $DisplayName -match $TestNameRegex) {
+        $script:TestNameMatches++
         $flags.Add('TestNamed')
         if ($AssignmentInfo.AllDevices -or $AssignmentInfo.AllUsers) { $flags.Add('TestNamedBroadAssign') }
     }
@@ -402,7 +547,12 @@ function New-InventoryRow {
     foreach ($e in $ExtraFlags) { if ($e) { $flags.Add([string]$e) } }
 
     $flagText = ($flags -join '; ')
+    # A name-matched retained version counts as referenced only while it is still within
+    # the rollback window. Once expired it is ordinary unassigned clutter again.
     $referenced = ($flagText -match 'SupersededByNewer|HasDependents|ReferencedByRelationship')
+    if (($flagText -match 'SupersededByName') -and ($flagText -notmatch 'RetainedVersionExpired')) {
+        $referenced = $true
+    }
 
     # Priority drives the actionable cleanup list. Informational-only flags
     # (DuplicateName) never raise it above blank on their own.
@@ -449,7 +599,7 @@ function Get-NameCounts {
 # Object types that belong to another platform. Matched before any Windows test, so a
 # type that happens to contain a Windows-ish word (macOSOfficeSuiteApp) is never
 # mistaken for a Windows object.
-$script:OtherPlatformPattern = 'macos|ios|android|aosp|windowsphone'
+$script:OtherPlatformPattern = 'macos|ios|android|aosp|linux|windowsphone'
 
 # Windows application types, matched exactly. An allow-list rather than a substring
 # pattern: substring matching silently swallows any type Microsoft adds later, and the
@@ -538,6 +688,11 @@ function Add-ExpandableInventory {
         [switch]$AppendODataType
     )
     $raw = Invoke-GraphPaged -Uri $Uri
+
+    # Before filtering: every assignment on every platform contributes to the referenced
+    # group set. Reporting is Windows only; referencing must be tenant wide.
+    foreach ($o in $raw) { Add-AssignmentGroupReference $o.assignments }
+
     if ($WindowsPattern) {
         $raw = Select-WindowsObject -Objects $raw -Area $TypeLabel `
                    -ClassifyProperty $ClassifyProperty -WindowsPattern $WindowsPattern
@@ -564,7 +719,7 @@ function Add-ExpandableInventory {
     }
 }
 
-function Ensure-Rows {
+function Get-ExportRows {
     # An empty sheet exported with no rows loses its header row, so a single
     # placeholder is written instead. -Worklist keeps the placeholder column set
     # matching the Worklist sheet rather than the inventory sheets.
@@ -585,12 +740,28 @@ function Ensure-Rows {
     return , $Rows
 }
 
-function Count-Flagged {
+function Get-ActionableCount {
     param($Rows)
     if ($null -eq $Rows) { return [int]0 }
     $n = 0
-    foreach ($r in $Rows) { if ($r.Priority -and ([string]$r.Priority) -ne '' -and ([string]$r.Priority) -ne 'Watch') { $n++ } }
+    # Actionable means the operator is expected to do something: High and Medium only.
+    # Low is 'keep or confirm' and Watch is parked; counting either inflates the queue.
+    foreach ($r in $Rows) { if ((([string]$r.Priority) -eq 'High') -or (([string]$r.Priority) -eq 'Medium')) { $n++ } }
     return [int]$n
+}
+
+function Get-PriorityCounts {
+    param($Rows)
+    $c = [ordered]@{ High = 0; Medium = 0; Low = 0; Watch = 0; Healthy = 0 }
+    foreach ($r in $Rows) {
+        $p = [string]$r.Priority
+        if     ($p -eq 'High')   { $c.High++ }
+        elseif ($p -eq 'Medium') { $c.Medium++ }
+        elseif ($p -eq 'Low')    { $c.Low++ }
+        elseif ($p -eq 'Watch')  { $c.Watch++ }
+        else                     { $c.Healthy++ }
+    }
+    return $c
 }
 
 function Get-RowCount {
@@ -614,45 +785,78 @@ foreach ($m in @('Microsoft.Graph.Authentication', 'ImportExcel')) {
 Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
 Import-Module ImportExcel -ErrorAction Stop
 
-# Conditional Access token protection (bound tokens) is only satisfied when sign-in
-# goes through the Windows broker (WAM). Current releases of
-# Microsoft.Graph.Authentication enable broker sign-in by default on Windows and the
-# old Set-MgGraphOption -EnableLoginByWAM switch no longer has any effect, so nothing
-# is set here. If a fresh interactive sign-in fails with AADSTS530084, update
-# Microsoft.Graph.Authentication and add the broker redirect URI
-# ms-appx-web://Microsoft.AAD.BrokerPlugin/<client id> to the app registration.
-
-Write-Host 'Connecting to Microsoft Graph (delegated)...'
-# Do NOT pass -Scopes here. With a custom -ClientId, MSAL treats requested scopes
-# as a new authorization and triggers a consent prompt; the token must instead
-# carry the permissions already consented on the app registration.
-Connect-MgGraph -ClientId $ClientId -TenantId $TenantId -NoWelcome -ErrorAction Stop
-$ctx = Get-MgContext
-if (-not $ctx) { throw 'Failed to establish a Graph context.' }
-Write-Host ("Connected as {0}" -f $ctx.Account)
-
-# Report the scopes actually carried by the token. A cached session created before
-# a consent change can persist with fewer scopes than the app registration now
-# grants, which silently disables the Entra group section. Disconnect-MgGraph and
-# re-run to refresh the cache if a scope is reported missing.
-# Group.Read.All and User.Read.All are only needed when the Entra group section will
-# actually run, so they are not reported as missing on an Intune-only run.
-$grantedScopes = @()
-if ($ctx.Scopes) { $grantedScopes = @($ctx.Scopes) }
-$neededScopes = [System.Collections.Generic.List[string]]::new()
-$neededScopes.Add('DeviceManagementApps.Read.All')
-$neededScopes.Add('DeviceManagementConfiguration.Read.All')
-if ($GroupOwnerUpns.Count -gt 0) {
-    $neededScopes.Add('Group.Read.All')
-    $neededScopes.Add('User.Read.All')
-}
-foreach ($needed in $neededScopes) {
-    if ($grantedScopes -notcontains $needed) {
-        Write-Warning ("Token does not carry '{0}'. If this is unexpected, run Disconnect-MgGraph and re-run the script to refresh the cached session." -f $needed)
-    }
+# Multiple side-by-side versions of the Graph modules are common on an admin
+# workstation. PowerShell loads the first path in PSModulePath that holds the module,
+# not the newest version, so report what actually loaded rather than what is installed.
+$script:GraphAuthVersion = (Get-Module Microsoft.Graph.Authentication).Version
+$installedAuth = @(Get-Module Microsoft.Graph.Authentication -ListAvailable |
+                   Select-Object -ExpandProperty Version | Sort-Object -Unique)
+Write-Host ("Microsoft.Graph.Authentication {0} loaded." -f $script:GraphAuthVersion)
+if ($installedAuth.Count -gt 1) {
+    Write-Warning ("{0} versions of Microsoft.Graph.Authentication are installed ({1}). PowerShell loads by PSModulePath order, not by version. Mixed Graph module versions are the usual cause of sign-in failing with a 'Could not load type ... Microsoft.Identity.Client' error." -f $installedAuth.Count, ($installedAuth -join ', '))
 }
 
 try {
+    # Conditional Access token protection (bound tokens) is only satisfied when sign-in
+    # goes through the Windows broker (WAM). Current releases of
+    # Microsoft.Graph.Authentication enable broker sign-in by default on Windows and the
+    # old Set-MgGraphOption -EnableLoginByWAM switch no longer has any effect, so nothing
+    # is set here. If a fresh interactive sign-in fails with AADSTS530084, update
+    # Microsoft.Graph.Authentication and add the broker redirect URI
+    # ms-appx-web://Microsoft.AAD.BrokerPlugin/<client id> to the app registration.
+
+    # Reuse a session that already matches. Every Connect-MgGraph under Conditional
+    # Access token protection means another broker prompt, and running the script twice
+    # in quick succession made the second sign-in fail with ApplicationCanceled while
+    # the first was still tearing down. Only a session this script opened is closed
+    # again, so a session the operator established stays theirs.
+    $existing = Get-MgContext
+    if ($existing -and
+        ([string]$existing.TenantId -eq [string]$TenantId) -and
+        ([string]$existing.ClientId -eq [string]$ClientId)) {
+        $ctx = $existing
+        Write-Host ("Reusing the existing Graph session for {0}" -f $ctx.Account)
+    }
+    else {
+        if ($existing) {
+            Write-Host 'An existing Graph session is for a different tenant or app registration. Reconnecting.'
+            Disconnect-MgGraph | Out-Null
+        }
+        Write-Host 'Connecting to Microsoft Graph (delegated)...'
+        # Do NOT pass -Scopes here. With a custom -ClientId, MSAL treats requested scopes
+        # as a new authorization and triggers a consent prompt; the token must instead
+        # carry the permissions already consented on the app registration.
+        Connect-MgGraph -ClientId $ClientId -TenantId $TenantId -NoWelcome -ErrorAction Stop
+        $script:ConnectionOwned = $true
+        $ctx = Get-MgContext
+        if (-not $ctx) { throw 'Failed to establish a Graph context.' }
+        Write-Host ("Connected as {0}" -f $ctx.Account)
+    }
+
+    # Report the scopes actually carried by the token. A cached session created before
+    # a consent change can persist with fewer scopes than the app registration now
+    # grants, which silently disables the Entra group section. Disconnect-MgGraph and
+    # re-run to refresh the cache if a scope is reported missing.
+    # Group.Read.All and User.Read.All are only needed when the Entra group section will
+    # actually run, so they are not reported as missing on an Intune-only run.
+    $grantedScopes = @()
+    if ($ctx.Scopes) { $grantedScopes = @($ctx.Scopes) }
+    $neededScopes = [System.Collections.Generic.List[string]]::new()
+    $neededScopes.Add('DeviceManagementApps.Read.All')
+    $neededScopes.Add('DeviceManagementConfiguration.Read.All')
+    if ($GroupOwnerUpns.Count -gt 0) {
+        $neededScopes.Add('Group.Read.All')
+        $neededScopes.Add('User.Read.All')
+    }
+    foreach ($needed in $neededScopes) {
+        # A ReadWrite grant satisfies the matching Read requirement. The tool only ever
+        # issues GET, but plenty of app registrations are consented ReadWrite for other
+        # tooling, and warning about a permission the token exceeds is just noise.
+        $alt = $needed -replace '\.Read\.', '.ReadWrite.'
+        if (($grantedScopes -notcontains $needed) -and ($grantedScopes -notcontains $alt)) {
+            Write-Warning ("Token does not carry '{0}' or '{1}'. If this is unexpected, run Disconnect-MgGraph and re-run the script to refresh the cached session." -f $needed, $alt)
+        }
+    }
     # -----------------------------------------------------------------------
     # Inventory - Windows Intune objects
     # -----------------------------------------------------------------------
@@ -666,14 +870,30 @@ try {
 
     Write-Host 'Collecting applications...'
     $appsRaw = Invoke-GraphPaged -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?`$expand=assignments"
+    foreach ($a in $appsRaw) { Add-AssignmentGroupReference $a.assignments }
     $appsWin = Select-WindowsObject -Objects $appsRaw -Area 'Applications' -WindowsTypes $script:WindowsAppTypes
     $appNameCounts = Get-NameCounts -Objects $appsWin -NameProperty 'displayName'
+
+    # Index every Windows app by base name and version so a retained previous version can
+    # be recognised without a supersedence relationship. Not every publishing workflow
+    # creates supersedence, and where it does not there is no link to follow: an
+    # unassigned 'App 1.2' sitting beside an assigned 'App 1.3' is a rollback copy, not
+    # abandoned clutter. Built from data already collected, so no extra Graph calls.
+    $appIndex = New-Object System.Collections.Generic.List[object]
+    foreach ($app in $appsWin) {
+        $dn = [string]$app.displayName
+        $iai = Get-AssignmentInfo $app.assignments
+        $appIndex.Add([pscustomobject]@{
+            Id           = [string]$app.id
+            Base         = (Get-AppBaseName $dn)
+            Version      = (Get-AppVersion $dn)
+            HasInclusion = [bool]$iai.HasInclusion
+        })
+    }
 
     $rowsApps = New-Object System.Collections.Generic.List[object]
     foreach ($app in $appsWin) {
         $ai = Get-AssignmentInfo $app.assignments
-        foreach ($g in $ai.IncludeGroups) { Add-ReferencedGroup $g }
-        foreach ($g in $ai.ExcludeGroups) { Add-ReferencedGroup $g }
 
         # Where a publishing workflow creates Intune supersedence relationships, a
         # retained previous version can be identified directly: supersedingAppCount > 0
@@ -688,6 +908,23 @@ try {
         if ($app.PSObject.Properties.Name -contains 'dependentAppCount')   { $dep   = [int]$app.dependentAppCount }
         if ($supBy -gt 0) { $extra += 'SupersededByNewer' }
         if ($dep   -gt 0) { $extra += 'HasDependents' }
+
+        # Name-and-version fallback for retained versions. Deliberately narrow: the app
+        # must be unassigned, its name must carry a parseable version, and a sibling with
+        # the same base name must have BOTH a higher version AND a live inclusion
+        # assignment. Two unassigned versions of a retired app stay in the cleanup queue,
+        # which is the correct outcome.
+        if ($ai.Count -eq 0 -and $supBy -eq 0) {
+            if (Test-SupersededByName -DisplayName ([string]$app.displayName) -Id ([string]$app.id) -Index $appIndex) {
+                $extra += 'SupersededByName'
+                # A rollback copy has a shelf life. Past -RetainedVersionMonths the
+                # rollback is not realistic any more and the package returns to the
+                # queue, still labelled so the operator knows what it is.
+                if (Test-Stale $app.createdDateTime $RetainedVersionMonths) {
+                    $extra += 'RetainedVersionExpired'
+                }
+            }
+        }
         $type = 'App - ' + ([string]$app.'@odata.type' -replace '#microsoft.graph.', '')
         $rowsApps.Add( (New-InventoryRow -DisplayName ([string]$app.displayName) -ObjectType $type -Id ([string]$app.id) `
                         -Created $app.createdDateTime -LastModified $app.lastModifiedDateTime `
@@ -751,7 +988,13 @@ try {
     # The referenced-group set is now fully populated from every object above.
     # -----------------------------------------------------------------------
 
+    if ($GroupOwnerUpns.Count -gt 0) { Add-ReferenceOnlyGroups }
+
     Write-Host 'Collecting owner-scoped Entra ID groups...'
+    if ($script:GraphReadIncomplete -and $GroupOwnerUpns.Count -gt 0) {
+        Write-Warning 'Entra group analysis skipped: at least one Graph read failed, so the set of referenced groups is incomplete. A group could be reported as unreferenced only because the assignment naming it was never read. Re-run once the failure above is resolved.'
+        $GroupOwnerUpns = @()
+    }
     if ($GroupOwnerUpns.Count -eq 0) {
         Write-Host '  Skipped: no -GroupOwnerUpns supplied. Pass the owner accounts whose assignment groups you want checked.'
     }
@@ -851,18 +1094,40 @@ try {
     $runInfo.Add([pscustomobject][ordered]@{ Setting='Graph endpoint';       Value='beta' })
     $runInfo.Add([pscustomobject][ordered]@{ Setting='Platform scope';       Value='Windows' })
     $runInfo.Add([pscustomobject][ordered]@{ Setting='TestNameRegex';        Value=$(if ($TestNameRegex) { $TestNameRegex } else { '(not set - test objects not flagged)' }) })
-    $runInfo.Add([pscustomobject][ordered]@{ Setting='NewAppGraceMonths';    Value=[string]$NewAppGraceMonths })
+    $runInfo.Add([pscustomobject][ordered]@{ Setting='NewAppGraceMonths';     Value=[string]$NewAppGraceMonths })
+    $runInfo.Add([pscustomobject][ordered]@{ Setting='RetainedVersionMonths'; Value=$(if ($RetainedVersionMonths -eq 0) { '0 - retained copies not excused' } else { [string]$RetainedVersionMonths }) })
     $runInfo.Add([pscustomobject][ordered]@{ Setting='GroupNamePrefix';      Value=$(if ($GroupNamePrefix) { $GroupNamePrefix } else { '(not set)' }) })
     $runInfo.Add([pscustomobject][ordered]@{ Setting='Group owners checked'; Value=[string]$GroupOwnerUpns.Count })
+    $runInfo.Add([pscustomobject][ordered]@{ Setting='PowerShell';            Value=[string]$PSVersionTable.PSVersion })
+    $runInfo.Add([pscustomobject][ordered]@{ Setting='Graph auth module';     Value=[string]$script:GraphAuthVersion })
+    $runInfo.Add([pscustomobject][ordered]@{ Setting='Collection complete';   Value=$(if ($script:GraphReadIncomplete) { 'No - at least one Graph read failed' } else { 'Yes' }) })
+    $runInfo.Add([pscustomobject][ordered]@{ Setting='Actionable means';      Value='High + Medium. Low and Watch are excluded.' })
+    $runInfo.Add([pscustomobject][ordered]@{ Setting='Test names matched';    Value=$(if ($TestNameRegex) { ('{0} of {1} object names' -f $script:TestNameMatches, $script:ObjectsExamined) } else { 'detection not enabled' }) })
 
+    # Per-priority columns: with retained versions parked at Watch and Low, a bare
+    # Total/Actionable pair hides where most of the estate went.
     $summary = New-Object System.Collections.Generic.List[object]
-    $summary.Add([pscustomobject][ordered]@{ Category='Applications';         Total=(Get-RowCount $rowsApps);        Actionable=(Count-Flagged $rowsApps) })
-    $summary.Add([pscustomobject][ordered]@{ Category='ConfigProfiles';       Total=(Get-RowCount $rowsConfig);      Actionable=(Count-Flagged $rowsConfig) })
-    $summary.Add([pscustomobject][ordered]@{ Category='CompliancePolicies';   Total=(Get-RowCount $rowsCompliance);  Actionable=(Count-Flagged $rowsCompliance) })
-    $summary.Add([pscustomobject][ordered]@{ Category='SecurityBaselines';    Total=(Get-RowCount $rowsBaseline);    Actionable=(Count-Flagged $rowsBaseline) })
-    $summary.Add([pscustomobject][ordered]@{ Category='Remediations';         Total=(Get-RowCount $rowsRemediation); Actionable=(Count-Flagged $rowsRemediation) })
-    $summary.Add([pscustomobject][ordered]@{ Category='PlatformScripts';      Total=(Get-RowCount $rowsScripts);     Actionable=(Count-Flagged $rowsScripts) })
-    $summary.Add([pscustomobject][ordered]@{ Category='EntraGroups(flagged)'; Total=(Get-RowCount $rowsGroups);      Actionable=(Get-RowCount $rowsGroups) })
+    function Add-SummaryRow {
+        param([string]$Category, $Rows)
+        $c = Get-PriorityCounts $Rows
+        $summary.Add([pscustomobject][ordered]@{
+            Category   = $Category
+            Total      = (Get-RowCount $Rows)
+            High       = $c.High
+            Medium     = $c.Medium
+            Low        = $c.Low
+            Watch      = $c.Watch
+            Healthy    = $c.Healthy
+            Actionable = ($c.High + $c.Medium)
+        })
+    }
+    Add-SummaryRow 'Applications'         $rowsApps
+    Add-SummaryRow 'ConfigProfiles'       $rowsConfig
+    Add-SummaryRow 'CompliancePolicies'   $rowsCompliance
+    Add-SummaryRow 'SecurityBaselines'    $rowsBaseline
+    Add-SummaryRow 'Remediations'         $rowsRemediation
+    Add-SummaryRow 'PlatformScripts'      $rowsScripts
+    Add-SummaryRow 'EntraGroups(flagged)' $rowsGroups
 
     $allReal = New-Object System.Collections.Generic.List[object]
     foreach ($r in $rowsApps)        { $allReal.Add($r) }
@@ -894,6 +1159,14 @@ try {
             $reason = 'Unassigned, but a newer version supersedes it (retained rollback version)'
             $action = 'Keep'
         }
+        elseif ($f -match 'RetainedVersionExpired') {
+            $reason = 'Retained previous version of an application that is still assigned, but created outside the rollback window; a rollback this old is no longer realistic'
+            $action = 'Remove'
+        }
+        elseif ($f -match 'SupersededByName') {
+            $reason = 'Unassigned, but a newer version of the same application is assigned (retained rollback copy, matched by name and version because no supersedence relationship exists)'
+            $action = 'Keep'
+        }
         elseif ($f -match 'HasDependents') {
             $reason = 'Unassigned, but another app depends on it'
             $action = 'Keep'
@@ -910,8 +1183,8 @@ try {
             $parts = @()
             if ($f -match 'ZeroMembers')     { $parts += 'no members' }
             if ($f -match 'NotUsedInIntune') { $parts += 'no Intune assignment referencing it' }
-            $reason = 'Owned assignment group with ' + ($parts -join ' and ')
-            $action = 'Remove'
+            $reason = 'Owned assignment group with ' + ($parts -join ' and ') + '. Verify in the portal first: the group could still be used by an object type this tool does not read'
+            $action = 'Investigate'
         }
         elseif ($pri -eq 'Medium') {
             $reason = 'Unassigned; nothing references it'
@@ -921,6 +1194,9 @@ try {
             $reason = 'TEST-named object scoped to a group; confirm the test is finished'
             $action = 'Investigate'
         }
+        # A test-named object that is also unassigned matches the Medium branch first, so
+        # the reason would lose the fact that it is a test object. Keep the label.
+        if (($f -match 'TestNamed') -and ($reason -notmatch 'test')) { $reason = $reason + '; test-named' }
         if ($f -match 'DuplicateName') { $reason = $reason + '; duplicate display name exists' }
 
         $item = [pscustomobject][ordered]@{
@@ -970,14 +1246,14 @@ try {
     Write-Host 'Writing Excel tracker...'
     $pkg = $summary                       | Export-Excel -Path $xlsx -WorksheetName 'Summary'                 @common
     $pkg = $runInfo                       | Export-Excel -ExcelPackage $pkg -WorksheetName 'RunInfo'            @common
-    $pkg = (Ensure-Rows $worklist -Worklist) | Export-Excel -ExcelPackage $pkg -WorksheetName 'Worklist'           @common
-    $pkg = (Ensure-Rows $rowsApps)        | Export-Excel -ExcelPackage $pkg -WorksheetName 'Applications'       @common
-    $pkg = (Ensure-Rows $rowsConfig)      | Export-Excel -ExcelPackage $pkg -WorksheetName 'ConfigProfiles'     @common
-    $pkg = (Ensure-Rows $rowsCompliance)  | Export-Excel -ExcelPackage $pkg -WorksheetName 'CompliancePolicies' @common
-    $pkg = (Ensure-Rows $rowsBaseline)    | Export-Excel -ExcelPackage $pkg -WorksheetName 'SecurityBaselines'  @common
-    $pkg = (Ensure-Rows $rowsRemediation) | Export-Excel -ExcelPackage $pkg -WorksheetName 'Remediations'       @common
-    $pkg = (Ensure-Rows $rowsScripts)     | Export-Excel -ExcelPackage $pkg -WorksheetName 'PlatformScripts'    @common
-    $pkg = (Ensure-Rows $rowsGroups)      | Export-Excel -ExcelPackage $pkg -WorksheetName 'EntraGroups'        @common
+    $pkg = (Get-ExportRows $worklist -Worklist) | Export-Excel -ExcelPackage $pkg -WorksheetName 'Worklist'           @common
+    $pkg = (Get-ExportRows $rowsApps)        | Export-Excel -ExcelPackage $pkg -WorksheetName 'Applications'       @common
+    $pkg = (Get-ExportRows $rowsConfig)      | Export-Excel -ExcelPackage $pkg -WorksheetName 'ConfigProfiles'     @common
+    $pkg = (Get-ExportRows $rowsCompliance)  | Export-Excel -ExcelPackage $pkg -WorksheetName 'CompliancePolicies' @common
+    $pkg = (Get-ExportRows $rowsBaseline)    | Export-Excel -ExcelPackage $pkg -WorksheetName 'SecurityBaselines'  @common
+    $pkg = (Get-ExportRows $rowsRemediation) | Export-Excel -ExcelPackage $pkg -WorksheetName 'Remediations'       @common
+    $pkg = (Get-ExportRows $rowsScripts)     | Export-Excel -ExcelPackage $pkg -WorksheetName 'PlatformScripts'    @common
+    $pkg = (Get-ExportRows $rowsGroups)      | Export-Excel -ExcelPackage $pkg -WorksheetName 'EntraGroups'        @common
 
     # Header styling. -HeaderColor accepts any HTML colour string.
     try {
@@ -985,11 +1261,22 @@ try {
         foreach ($ws in $pkg.Workbook.Worksheets) {
             if ($ws.Dimension) {
                 $lastCol = $ws.Dimension.End.Column
+                $lastRow = $ws.Dimension.End.Row
                 $hdr = $ws.Cells[1, 1, 1, $lastCol]
                 $hdr.Style.Fill.PatternType = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
                 $hdr.Style.Fill.BackgroundColor.SetColor($brand)
                 $hdr.Style.Font.Color.SetColor([System.Drawing.Color]::White)
                 $hdr.Style.Font.Bold = $true
+
+                # Counts are whole objects, not measurements. Without this they render as
+                # 698.00, because the export converts numeric-looking values to doubles.
+                if ($ws.Name -eq 'Summary' -and $lastRow -gt 1 -and $lastCol -gt 1) {
+                    $ws.Cells[2, 2, $lastRow, $lastCol].Style.Numberformat.Format = '0'
+                }
+                # RunInfo values are labels, some of which happen to look like numbers.
+                if ($ws.Name -eq 'RunInfo' -and $lastRow -gt 1) {
+                    $ws.Cells[2, 2, $lastRow, 2].Style.Numberformat.Format = '@'
+                }
             }
         }
     }
@@ -1001,14 +1288,44 @@ try {
 
     Write-Host ''
     Write-UnrecognisedTypeWarning
+
+    if ($TestNameRegex) {
+        Write-Host ("Test-object detection: {0} of {1} object names matched '{2}'." -f $script:TestNameMatches, $script:ObjectsExamined, $TestNameRegex)
+        if ($script:TestNameMatches -eq 0) {
+            Write-Warning ("No object name matched '{0}'. That is either a clean estate or the wrong pattern for your naming convention. Anchor on a word boundary rather than a bare substring: '(^|[-_ (\[])TEST([-_ )\]]|$)' matches Wifi-TEST, Wifi_TEST and Wifi (test), while a bare 'test' also matches Latest and Attestation." -f $TestNameRegex)
+        }
+    }
+
     Write-Host ("Done. Decision tracker written to: {0}" -f $xlsx)
     Write-Host ("Worklist items (High/Medium/Low): {0}" -f (Get-RowCount $worklist))
 }
 catch {
+    $errMessage = [string]$_.Exception.Message
+
+    # Translate the failures that are environmental rather than tenant problems, so the
+    # operator is not left reading a .NET type-load error and guessing.
+    $likelyCause = ''
+    if ($errMessage -match 'Could not load type|Microsoft\.Identity\.Client|FileLoadException|Could not load file or assembly') {
+        $likelyCause = 'Assembly conflict in this PowerShell session. Several side-by-side versions of the Microsoft.Graph modules share one Microsoft.Identity.Client, and Windows PowerShell 5.1 cannot isolate them. Run this in PowerShell 7, which loads the SDK dependencies in an isolated context.'
+    }
+    elseif ($errMessage -match 'AADSTS530084') {
+        $likelyCause = 'Conditional Access token protection rejected the sign-in. The app registration needs the broker redirect URI ms-appx-web://Microsoft.AAD.BrokerPlugin/<client id>, and the device must be joined or registered and compliant.'
+    }
+    elseif ($errMessage -match 'ApplicationCanceled|user_canceled|access_denied|Current Request already cancelled') {
+        $likelyCause = 'The sign-in prompt was closed, cancelled, or timed out. Re-run and complete the sign-in. If no prompt appeared, check for a broker window behind the console.'
+    }
+    elseif ($errMessage -match 'AADSTS65001|consent') {
+        $likelyCause = 'The app registration has not been admin-consented for the delegated permissions listed in the README.'
+    }
+    elseif ($errMessage -match 'Forbidden|403') {
+        $likelyCause = 'The signed-in account or the app registration lacks a required read permission. Check the scopes reported above.'
+    }
+
     Write-Host ''
     Write-Host '==================== ERROR ===================='
     Write-Host ("Type    : {0}" -f $_.Exception.GetType().FullName)
-    Write-Host ("Message : {0}" -f $_.Exception.Message)
+    Write-Host ("Message : {0}" -f $errMessage)
+    if ($likelyCause) { Write-Host ("Likely  : {0}" -f $likelyCause) }
     if ($_.InvocationInfo) {
         Write-Host ("Line #  : {0}" -f $_.InvocationInfo.ScriptLineNumber)
         Write-Host ("Command : {0}" -f ([string]$_.InvocationInfo.Line).Trim())
@@ -1018,5 +1335,5 @@ catch {
     Write-Host '==============================================='
 }
 finally {
-    if (Get-MgContext) { Disconnect-MgGraph | Out-Null }
+    if ($script:ConnectionOwned -and (Get-MgContext)) { Disconnect-MgGraph | Out-Null }
 }

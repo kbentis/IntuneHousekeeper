@@ -26,8 +26,14 @@ These are not preferences. Breaking any of them breaks the tool.
    ```
    That must print `0`.
 
-3. **Windows PowerShell 5.1 compatibility.** Not just PowerShell 7. Three specific
-   traps, all previously hit:
+3. **PowerShell 7 is the supported floor**, set by `#Requires -Version 7.0`. Windows
+   PowerShell 5.1 fails at `Connect-MgGraph` on any machine with several
+   `Microsoft.Graph.*` versions installed, because .NET Framework cannot isolate the
+   shared `Microsoft.Identity.Client`. Do not remove the `#Requires` line without
+   retesting that.
+
+   Keep the code free of 7-only syntax anyway, and keep the 5.1 parse job in CI. The
+   three traps below cost nothing to avoid and preserve the option to reverse this:
    - Do not wrap a `List[object]` in `@()`. It throws `ArgumentException: Argument
      types do not match` on 5.1. Iterate the list directly or read `.Count`.
    - Do not mark a collection parameter `[Parameter(Mandatory)]` if the caller passes
@@ -59,6 +65,19 @@ These are not preferences. Breaking any of them breaks the tool.
   different app assignment intents is deliberate and must not be flagged.
 - The `Worklist` sheet is the only place decisions are recorded. Category sheets are
   read-only inventory.
+- Actionable means High plus Medium. Never count `Low` or `Watch`: their recommended
+  action is to keep or to wait.
+- Referenced-group collection happens on the RAW result of each endpoint, before the
+  Windows filter, and additionally from `$script:ReferenceOnlyEndpoints`. Adding a new
+  object type to Intune means adding it there, or groups it targets will be reported as
+  unreferenced. A group used only by a macOS or mobile assignment must never be
+  reported as unreferenced. Group rows are `Investigate`, never `Remove`, because
+  several object types are not read at all.
+- If any Graph read fails, the Entra group section is skipped. An incomplete
+  referenced-group set makes 'nothing references this' unsafe to assert.
+- Retained-version detection must fail toward keeping. Requiring a parseable version and
+  an assigned newer sibling is deliberate; loosening either risks recommending deletion
+  of a live rollback copy.
 - `-NewAppGraceMonths` is the operator's call, including `0`. Do not reintroduce a
   hardcoded assumption about how long retained application versions live.
 - No naming convention ships with a default. `-TestNameRegex` and `-GroupNamePrefix` are

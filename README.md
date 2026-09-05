@@ -35,8 +35,14 @@ Windows objects: applications, configuration profiles (templates, Settings Catal
 ADMX), compliance policies, security baselines, remediations, and platform scripts.
 Optionally, Entra ID assignment groups that are empty or referenced by nothing.
 
-Not collected: Autopilot deployment profiles, enrolment status page and other enrolment
-configurations, assignment filters, and feature, quality, or driver update profiles.
+Not reported on: Autopilot deployment profiles, enrolment configurations, assignment
+filters, feature, quality and driver update profiles, app configuration and app
+protection policies, and macOS shell and custom attribute scripts.
+
+Their **assignments are still read** when the Entra group section runs, purely to
+establish which groups are referenced. Reporting is Windows only; referencing has to be
+tenant wide, or a group used solely by a macOS shell script looks like it is used by
+nothing.
 
 Object types are classified as Windows, another platform, or unrecognised. Applications
 are matched against an explicit list of Windows types, profiles and compliance policies
@@ -55,7 +61,8 @@ without notice.
 ## Requirements
 
 - Windows. Broker sign-in and the workbook header styling both depend on it.
-- Windows PowerShell 5.1 or PowerShell 7 on Windows. Both are supported.
+- **PowerShell 7.** Windows PowerShell 5.1 is not supported, and the script declines to
+  run there. See below for why.
 - Modules: `Microsoft.Graph.Authentication`, `ImportExcel`. ImportExcel writes the
   workbook itself, so Excel does not need to be installed.
   ```powershell
@@ -64,6 +71,24 @@ without notice.
   See the note on the Excel dependency below before deploying this in a commercial
   environment.
 - An Entra app registration, described below.
+
+### Why PowerShell 7 and not 5.1
+
+Windows PowerShell 5.1 runs on .NET Framework, which permits one version of a given
+assembly per process and provides no isolation between modules. An admin workstation
+that has accumulated several `Microsoft.Graph.*` module versions ends up with one
+`Microsoft.Identity.Client` serving all of them, and sign-in fails before the tool runs:
+
+```
+Connect-MgGraph : InteractiveBrowserCredential authentication failed:
+Could not load type 'Microsoft.Identity.Client.AuthScheme.TokenType'
+from assembly 'Microsoft.Identity.Client, Version=4.67.2.0'
+```
+
+Fixing that means uninstalling Graph modules the admin uses for other work, which is not
+a reasonable prerequisite for a read-only report. PowerShell 7 loads the SDK's
+dependencies in an isolated context and does not have the problem. This was reproduced
+on a normal enterprise workstation: identical command, 5.1 failed, 7 worked.
 
 ### App registration
 
@@ -89,6 +114,13 @@ PowerShell app.
 
 The last two are only needed if you use `-GroupOwnerUpns`. On a run without it, the
 script neither expects nor warns about them.
+
+**Use read-only scopes.** A `ReadWrite` grant satisfies the matching `Read` requirement
+and the script accepts it without complaint, but a registration consented for
+`ReadWrite` holds a token capable of changing your tenant. The tool only ever issues
+GET, and CI enforces that on every commit, so the registration is the last place that
+capability can live. A dedicated read-only app registration makes the safety property
+structural rather than behavioural.
 
 ### A note on the Excel dependency
 
@@ -153,6 +185,7 @@ to find the value.
 | `-TenantId` | required | Tenant ID |
 | `-OutputFolder` | `~\Documents` | Where the workbook is written |
 | `-NewAppGraceMonths` | `6` | Unassigned apps created within this many months are parked as `Watch`. `0` flags every unassigned app. Range 0-120 |
+| `-RetainedVersionMonths` | `12` | How long a name-matched previous version stays out of the cleanup queue. `0` queues every retained copy. Range 0-120 |
 | `-TestNameRegex` | none | Regex matching your own test-object naming convention. Empty skips test-object detection |
 | `-GroupNamePrefix` | none | Restricts the group check to your assignment group naming convention |
 | `-GroupOwnerUpns` | none | Owner accounts whose groups are checked. Empty skips the section |
@@ -174,8 +207,12 @@ identifiers and is safe to share.
 
 The remaining sheets are read-only inventory per object type.
 
-"Actionable" means High, Medium, or Low. Blank and `Watch` rows are excluded, so the
-actionable column adds up to the number of rows on the Worklist.
+"Actionable" means **High plus Medium**: the rows where you are expected to do
+something. `Low` is "keep or confirm", `Watch` is parked, and neither is counted. Low
+rows still appear on the Worklist, below the others, as context.
+
+The Summary breaks each category down by priority, so you can see where the estate went
+rather than only how much of it needs attention.
 
 One caveat on the Summary: the `EntraGroups(flagged)` row counts only the groups that
 were flagged, not every group examined. Every other row counts the whole category.
@@ -208,6 +245,8 @@ objects; a group is either worth a look or it is not.
 | `DuplicateName` | Display name occurs more than once within its type. Informational only, never raises priority |
 | `IncludeExcludeOverlap` | Same group included and excluded within one assignment intent. The exclusion wins, so that group is silently skipped |
 | `SupersededByNewer` | (apps) A newer version supersedes this one |
+| `SupersededByName` | (apps) Unassigned, but a newer version of the same application is assigned. For workflows that do not create supersedence |
+| `RetainedVersionExpired` | (apps) `SupersededByName`, but older than `-RetainedVersionMonths`. Back in the cleanup queue |
 | `HasDependents` | (apps) Another app depends on this one |
 | `RecentlyCreated` | (apps) Unassigned, created within `-NewAppGraceMonths` |
 | `ZeroMembers` | (groups) No direct members |
@@ -225,15 +264,28 @@ names things `TEST-Wifi` or `Wifi (test)`, and a report showing no test objects 
 a clean result rather than as a check that never ran. Supply your own pattern:
 
 ```powershell
--TestNameRegex '-TEST$'                    # suffix
--TestNameRegex '^TEST[-_]'                 # prefix
--TestNameRegex '(^|[-_ ])TEST([-_ ]|$)'    # either
+-TestNameRegex '-TEST$'                          # hyphen suffix only
+-TestNameRegex '[-_ ]test$'                      # suffix, any separator
+-TestNameRegex '(^|[-_ (\[])TEST([-_ )\]]|$)'    # any position, word boundary
 ```
 
-The run states on screen which pattern it used, or that detection was skipped, and the
-same goes on the RunInfo sheet. A test-named object assigned to All Devices or All Users
-is the only finding in this tool that describes something actually reaching devices, so
-it is worth setting.
+A test-named object assigned to All Devices or All Users is the only finding in this
+tool that describes something actually reaching devices, so it is worth setting
+correctly.
+
+**Anchor the pattern.** A bare `test` also matches `Latest`, `Attestation` and
+`Protest`. In one real tenant, 75 object names contained the substring and 53 of those
+were Latest or Attestation objects. Flagging a Device Health Attestation policy on All
+Devices as a leftover test object would put a `High` row in front of you that is
+completely wrong. The word-boundary form above matches `Wifi-TEST`, `Wifi_TEST`,
+`Wifi TEST` and `Wifi (test)` while leaving all of those alone.
+
+**Check the match count.** The run reports how many object names matched, and warns when
+none did, because a report with no test findings otherwise reads as a clean estate
+rather than as a wrong pattern. The same count is recorded on the RunInfo sheet. If you
+expect leftovers and see zero, the separator is the usual culprit: matching is
+case-insensitive, so `-TEST$` finding nothing while `[-_ ]test$` finds plenty means your
+convention uses a space or an underscore rather than a hyphen.
 
 ---
 
@@ -246,19 +298,46 @@ previous version retained so a bad release can be rolled back.
 Where your publishing workflow creates Intune **supersedence** relationships, a retained
 version is identified properly, flagged `SupersededByNewer`, and dropped to Low.
 
-Where it does not, there is no link to follow, so creation date is the fallback. Any
-unassigned app created within `-NewAppGraceMonths` is parked as `Watch` and left out of
-the worklist and the actionable counts. You choose the window: set it to roughly the age
-of the oldest version you expect to keep, or to `0` to flag every unassigned app
-regardless of age.
+Where it does not, two fallbacks apply.
 
-Trade-off at the default of six months: an app that has had no new version in longer
-than that will have its retained copy age into `Medium` and appear for review.
+**Creation date.** Any unassigned app created within `-NewAppGraceMonths` is parked as
+`Watch` and left out of the worklist and the actionable counts. You choose the window:
+roughly the age of the oldest version you expect to keep, or `0` to flag every
+unassigned app regardless of age.
+
+**Name and version.** An unassigned app is flagged `SupersededByName` and dropped to Low
+when its display name carries a version, and another app with the same base name has
+both a higher version and a live inclusion assignment. `App 1.2` sitting unassigned
+beside an assigned `App 1.3` is a rollback copy, not clutter.
+
+The rule is deliberately narrow. Two unassigned versions of a retired app stay in the
+cleanup queue, which is correct. Architecture and edition markers survive base-name
+matching, so an x64 package is never matched against x86. An app whose name carries no
+version is never demoted.
+
+**Rollback copies expire.** Keeping the previous version is worth it because a bad
+update can be rolled back. That argument weakens with age: nobody is rolling back to a
+build from two years ago. Past `-RetainedVersionMonths`, a name-matched copy is flagged
+`RetainedVersionExpired` and returns to `Medium` with a suggested action of Remove,
+still labelled so you can see what it is rather than wondering why an old version is in
+the queue.
+
+The default of 12 months is a starting point, not a recommendation. Set it to how long a
+rollback is realistically useful where you work, `0` to queue every retained copy, or
+`120` to keep them indefinitely.
+
+A real Intune **supersedence** relationship never expires this way. That link is
+configuration the newer app depends on, so a superseded version stays `Keep` regardless
+of age.
 
 ---
 
 ## Known limitations
 
+- `NotUsedInIntune` means "not referenced by any assignment found". Every platform
+  counts, and twelve object types outside the report are read for their assignments as
+  well. Any type Microsoft adds later is invisible until it is added to that list, which
+  is why group rows are `Investigate` and never `Remove`.
 - Assignments pointing at **empty or deleted groups** are not detected. Those look
   healthy while deploying to nothing. This is the most useful thing to add next.
 - **Assignment filters are not evaluated.** An object assigned through a filter that

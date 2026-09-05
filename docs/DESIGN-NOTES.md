@@ -42,6 +42,10 @@ The scale as it stands:
 Read top-down, the scale is: things that are actively wrong first, then inert objects
 ranked by how confidently they can be called abandoned. Only High can affect a device.
 
+Actionable, on the Summary and in the counts, means High plus Medium only. Low is
+"keep or confirm" and Watch is parked. An early version counted Low as actionable, which
+put rows whose recommended action was literally `Keep` into the cleanup queue.
+
 Flagged Entra groups are written at Medium unconditionally. The Intune scale does not
 map onto a group, and a group that is empty or referenced by nothing is either worth a
 look or it is not.
@@ -166,9 +170,57 @@ it to `0` disables the grace window entirely and flags every unassigned app.
 The parameter was originally called `-StaleMonths`, which was misleading: it has nothing
 to do with staleness and is not applied to any object type other than applications.
 
+### The name-and-version fallback
+
+Creation date alone was not enough. Measured against a real tenant of 698 Windows apps
+with a publishing tool that does not create supersedence: 217 retained versions fell
+inside the six-month window and were parked correctly, but 66 aged past it into
+`Medium`, and 57 of those had a newer version of the same app that was still assigned.
+The tool was recommending removal of live rollback copies, at scale.
+
+So an unassigned app is now flagged `SupersededByName` and dropped to Low when all of
+the following hold:
+
+- it has no assignments at all
+- its display name contains a parseable dotted version
+- another app shares its base name, has a higher version, and has a live inclusion
+  assignment
+
+Base name is the display name with dotted-numeric tokens removed. Architecture and
+edition markers contain no dotted number and therefore survive, which keeps x64 and x86
+packages from matching each other.
+
+Every part of that is chosen to fail in the safe direction. Requiring the newer sibling
+to be assigned means two unassigned versions of a retired application both stay in the
+cleanup queue, which is right. Requiring a parseable version means an unversioned name
+is never demoted. Over-detection tells you to keep something you wanted gone, which
+wastes a minute; under-detection tells you to delete something you needed, which does
+not.
+
+### Retained versions expire
+
+The first version of this rule demoted a name-matched copy forever, which was wrong for
+the reason the rule exists at all. The justification for keeping N-1 is that a bad update
+can be rolled back. That justification decays: nobody rolls back to a build from two
+years ago, so an ancient N-1 is not a rollback copy, it is clutter that happens to have a
+sibling.
+
+`-RetainedVersionMonths` is therefore separate from `-NewAppGraceMonths`. They answer
+different questions. The grace window asks "was this created too recently to judge". The
+retention window asks "is this rollback still worth holding". Conflating them into one
+number would force an operator to pick a value that is wrong for one of the two.
+
+Past the retention window the object is flagged `RetainedVersionExpired`, stops counting
+as referenced, and returns to `Medium` with an explicit reason. It keeps the
+`SupersededByName` flag as well, so the operator can see it is a known previous version
+rather than a mystery.
+
+A genuine Intune supersedence relationship is exempt. That link is configuration the
+newer application depends on, so age does not make removal safe.
+
 **Known trade-off:** an application that has received no new version in longer than the
-window will have its retained copy age into `Medium` and appear for review. That is
-intentional. A package chain that stale is worth a look.
+window, and no assigned newer sibling, will still age into `Medium` and appear for
+review. That is intentional. A package chain that stale is worth a look.
 
 ---
 
@@ -192,6 +244,64 @@ deliberately rather than to inherit from a version bump.
 
 Where an environment genuinely cannot install the module, the answer is an explicit
 CSV output option, not making CSV the default and degrading the tracker for everyone.
+
+---
+
+## Why PowerShell 7 is the floor
+
+The original target was Windows PowerShell 5.1 and PowerShell 7 equally. Testing killed
+that.
+
+5.1 runs on .NET Framework, which permits one version of an assembly per process with no
+isolation between modules. On an ordinary admin workstation carrying several
+`Microsoft.Graph.*` versions side by side, they share a single
+`Microsoft.Identity.Client`, and `Connect-MgGraph` fails with `Could not load type
+'Microsoft.Identity.Client.AuthScheme.TokenType'` before the tool does anything.
+Pinning the module version with `-RequiredVersion` did not help; the assembly is already
+resolved for the process. PowerShell 7 loads the SDK's dependencies in an isolated
+context, and the same command on the same machine worked first time.
+
+The only 5.1 fix is uninstalling Graph modules the admin uses for other work, which is
+not a reasonable prerequisite for a read-only report. `#Requires -Version 7.0` states
+it, and the error message translation names PowerShell 7 explicitly when the assembly
+signature appears.
+
+The three 5.1 landmines below are kept anyway. They cost nothing, and the CI job still
+parses under both hosts, so the option to reverse this stays open.
+
+---
+
+## Referencing is tenant wide, reporting is Windows only
+
+A group referenced only by a macOS profile is still a group in use. The first version
+collected referenced group IDs from objects that had already passed the Windows filter,
+so those groups came back `NotUsedInIntune` with a suggested action of Remove. For a
+tenant with a separate macOS or mobile estate, that is the tool telling you to delete
+groups that are actively deploying software.
+
+Group IDs are now harvested from the raw result of every endpoint, before filtering.
+Reporting stays Windows only; referencing does not.
+
+That was necessary but not sufficient. Several object types are not collected for the
+report at all, and a group used only by one of those still looked unreferenced. Measured
+in a live tenant: of six flagged groups, one was targeted by a macOS shell script, an
+endpoint the tool never read. The report was pointing at a group that was deploying
+scripts to Macs.
+
+So a second list exists, `$script:ReferenceOnlyEndpoints`: twelve endpoints that are
+read for their assignments and never reported on. macOS shell and custom attribute
+scripts, Autopilot, enrolment configurations, the three update profile types, app
+configuration and app protection policies. They are only queried when the group section
+is going to run, so an Intune-only run does not pay for them.
+
+That still is not a proof. Any object type Microsoft adds is invisible until someone
+adds it to the list, so group rows remain `Investigate` rather than `Remove`, and the
+reason text says to check the portal.
+
+The same reasoning drives the incomplete-read rule. If any Graph GET fails, the
+referenced-group set is partial, so a group could look unreferenced purely because the
+assignment naming it was never read. The group section is skipped entirely in that case
+rather than reported with a caveat.
 
 ---
 
