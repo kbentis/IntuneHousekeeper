@@ -4,7 +4,7 @@ Notable changes to Intune Housekeeper. Versions follow semantic versioning.
 
 ## Unreleased
 
-Pre-release development, validated against a production tenant of roughly 900 Windows
+Pre-release development, validated against a production tenant of roughly 1000 Windows
 objects. Changes worth recording because each came from something the tool got wrong:
 
 - Retained previous versions of applications are recognised by display name and version

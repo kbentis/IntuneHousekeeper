@@ -273,9 +273,8 @@ A test-named object assigned to All Devices or All Users is the only finding in 
 tool that describes something actually reaching devices, so it is worth setting
 correctly.
 
-**Anchor the pattern.** A bare `test` also matches `Latest`, `Attestation` and
-`Protest`. In one real tenant, 75 object names contained the substring and 53 of those
-were Latest or Attestation objects. Flagging a Device Health Attestation policy on All
+**Anchor the pattern.** A bare `test` could also match `Latest`, `Attestation` and
+`Protest`. Flagging a Device Health Attestation policy on All
 Devices as a leftover test object would put a `High` row in front of you that is
 completely wrong. The word-boundary form above matches `Wifi-TEST`, `Wifi_TEST`,
 `Wifi TEST` and `Wifi (test)` while leaving all of those alone.
