@@ -85,6 +85,17 @@ jobs:
           if ($failed) { exit 1 }
           Write-Host 'Parses clean under Windows PowerShell 5.1.'
 
+      # Must come before Test-ModuleManifest: the manifest declares RequiredModules, and
+      # Test-ModuleManifest resolves every one of them against what is installed. With
+      # the dependencies absent it fails on the manifest rather than on anything wrong
+      # in it.
+      - name: Install declared dependencies
+        shell: pwsh
+        run: |
+          Install-Module Microsoft.Graph.Authentication, ImportExcel -Force -Scope CurrentUser -SkipPublisherCheck -ErrorAction Stop
+          Get-Module Microsoft.Graph.Authentication, ImportExcel -ListAvailable |
+              Select-Object Name, Version | Format-Table -AutoSize | Out-String | Write-Host
+
       - name: Module manifest
         shell: pwsh
         run: |
@@ -96,9 +107,8 @@ jobs:
       - name: Import the module for real
         shell: pwsh
         run: |
-          # Installs the declared dependencies and loads the module, which is the only
-          # way to catch a manifest that is valid but wired up wrong.
-          Install-Module Microsoft.Graph.Authentication, ImportExcel -Force -Scope CurrentUser -SkipPublisherCheck -ErrorAction Stop
+          # A manifest can be valid and still wired up wrong. Importing is the only check
+          # that catches it.
           $env:PSModulePath = (Resolve-Path .).Path + [IO.Path]::PathSeparator + $env:PSModulePath
           Import-Module IntuneHousekeeper -Force -ErrorAction Stop
           $cmds = Get-Command -Module IntuneHousekeeper
