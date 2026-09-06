@@ -21,6 +21,11 @@ objects. Changes worth recording because each came from something the tool got w
 - PowerShell 7 is required. Windows PowerShell 5.1 fails at sign-in on any machine with
   several Microsoft.Graph module versions installed.
 - An existing Graph session is reused, and only a session the script opened is closed.
+- A missing token scope now prints the exact `Connect-MgGraph -Scopes` command that fixes
+  it. Consenting a permission does not put it in a cached token, and `Disconnect-MgGraph`
+  does not reliably clear that cache.
+- Graph failures include the error body rather than only the status code, so a 403 says
+  which permission it wanted.
 - `DeviceManagementScripts.Read.All` documented and checked. Without it, remediations and
   platform scripts return 403 and come back empty while the rest of the report looks fine.
 - A run where any Graph read failed now warns clearly that the report is incomplete,

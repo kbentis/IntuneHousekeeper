@@ -215,7 +215,20 @@ function Invoke-GraphPaged {
             $resp = Invoke-MgGraphRequest -Method GET -Uri $next -OutputType PSObject -ErrorAction Stop
         }
         catch {
-            Write-Warning ("Graph GET failed for {0}: {1}" -f $next, $_.Exception.Message)
+            # $_.Exception.Message for a Graph failure is usually just the status code.
+            # The response body carries the reason, which is the difference between
+            # 'Forbidden' and a message naming the missing permission or licence.
+            $detail = [string]$_.Exception.Message
+            if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                $body = [string]$_.ErrorDetails.Message
+                try {
+                    $parsed = $body | ConvertFrom-Json -ErrorAction Stop
+                    if ($parsed.error -and $parsed.error.message) { $body = [string]$parsed.error.message }
+                }
+                catch { }
+                if ($body -and $body -ne $detail) { $detail = ('{0} - {1}' -f $detail, $body) }
+            }
+            Write-Warning ("Graph GET failed for {0}: {1}" -f $next, $detail)
             $script:GraphReadIncomplete = $true
             break
         }
@@ -1099,14 +1112,26 @@ function Export-IntuneHousekeeperReport {
             $neededScopes.Add('Group.Read.All')
             $neededScopes.Add('User.Read.All')
         }
+        $missingScopes = [System.Collections.Generic.List[string]]::new()
         foreach ($needed in $neededScopes) {
             # A ReadWrite grant satisfies the matching Read requirement. The tool only ever
             # issues GET, but plenty of app registrations are consented ReadWrite for other
             # tooling, and warning about a permission the token exceeds is just noise.
             $alt = $needed -replace '\.Read\.', '.ReadWrite.'
             if (($grantedScopes -notcontains $needed) -and ($grantedScopes -notcontains $alt)) {
-                Write-Warning ("Token does not carry '{0}' or '{1}'. If this is unexpected, run Disconnect-MgGraph and re-run the script to refresh the cached session." -f $needed, $alt)
+                $missingScopes.Add($needed)
+                Write-Warning ("Token does not carry '{0}' or '{1}'. Calls needing it will fail with 403." -f $needed, $alt)
             }
+        }
+        if ($missingScopes.Count -gt 0) {
+            # Consent on the app registration and scopes in the token are different
+            # things. A permission added after the last sign-in is not picked up by a
+            # cached refresh token, and Disconnect-MgGraph does not always clear that
+            # cache: it can report 'no application to sign out from' while the cached
+            # token lives on. Asking for the scopes explicitly forces a fresh
+            # authorization, which is the one case where -Scopes with a custom client ID
+            # is the right thing to do.
+            Write-Warning ("To pick up permissions added since the last sign-in, run once: Connect-MgGraph -ClientId '{0}' -TenantId '{1}' -NoWelcome -Scopes {2}. If the scope is still missing afterwards, close all PowerShell windows and delete %LOCALAPPDATA%\.IdentityService\msal.cache." -f $ClientId, $TenantId, (($neededScopes | ForEach-Object { "'$_'" }) -join ','))
         }
         # -----------------------------------------------------------------------
         # Inventory - Windows Intune objects

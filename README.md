@@ -158,6 +158,17 @@ Or clone the repository and import the module folder directly:
 Import-Module .\IntuneHousekeeper\IntuneHousekeeper.psd1
 ```
 
+If that fails with "is not digitally signed", the files came from a browser download or a
+zip and carry Windows' mark of the web, which `RemoteSigned` blocks. Clear it:
+
+```powershell
+Get-ChildItem . -Recurse | Unblock-File
+```
+
+Files obtained with `git clone` are never marked, and neither are files installed with
+`Install-Module`. If `Get-ExecutionPolicy -List` shows `AllSigned`, that is a different
+matter: nothing unsigned will load regardless of origin, and this module is not signed.
+
 ## Usage
 
 ```powershell
@@ -410,6 +421,33 @@ be joined or registered and compliant, or token protection fails regardless.
 
 A related trap: a cached token keeps working after a policy or consent change, so only a
 *fresh* sign-in trips this. Run `Disconnect-MgGraph` and re-run to test properly.
+
+## Adding a permission later
+
+Consenting a permission on the app registration does not put it in your token. A cached
+refresh token minted before the change is reused silently, so calls keep failing with 403
+while the portal shows the permission granted. `Disconnect-MgGraph` does not reliably help
+either: it can report "no application to sign out from" while the cached token lives on,
+and it sometimes warns that it could not clear the MSAL cache.
+
+Force one fresh authorization by asking for the scopes explicitly:
+
+```powershell
+Disconnect-MgGraph -ErrorAction SilentlyContinue
+
+Connect-MgGraph -ClientId "<app id>" -TenantId "<tenant id>" -NoWelcome -Scopes `
+    'DeviceManagementApps.Read.All','DeviceManagementConfiguration.Read.All',
+    'DeviceManagementScripts.Read.All','Group.Read.All','User.Read.All'
+
+(Get-MgContext).Scopes
+```
+
+Then run the report in the same session; it reuses that connection. The module itself
+never passes `-Scopes`, because with a custom client ID MSAL treats it as a new
+authorization and prompts for consent. Here that prompt is exactly what you want, once.
+
+If the scope is still missing afterwards, close every PowerShell window and delete
+`%LOCALAPPDATA%\.IdentityService\msal.cache`.
 
 ---
 
