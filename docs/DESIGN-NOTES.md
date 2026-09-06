@@ -350,13 +350,24 @@ the opposite of the real situation.
 What still matters, and what the earlier version got wrong by omission, is the app
 registration. Brokered sign-in against your own client ID needs the redirect URI
 `ms-appx-web://Microsoft.AAD.BrokerPlugin/<client id>` under Mobile and desktop
-applications. Windows PowerShell 5.1 additionally needs
-`https://login.microsoftonline.com/common/oauth2/nativeclient`. The device must also be
-registered or joined and compliant, or token protection fails regardless.
+applications. The device must also be registered or joined and compliant, or token
+protection fails regardless.
 
 The failure is confusing because a cached token keeps working. Only a *fresh* sign-in
 trips the policy, so it can look like one specific scope is broken when it is really
 the whole authentication path.
+
+**Intune permissions do not imply one another.** `DeviceManagementScripts.Read.All` is
+required for remediations and platform scripts, and is not covered by
+`DeviceManagementConfiguration.Read.All`. Found the hard way on a clean test tenant
+following the README: both endpoints returned 403 while everything else worked, and the
+report came back with those categories empty, which looks exactly like a tenant that has
+none. The permission also covers the macOS shell and custom attribute scripts read for
+group references, so its absence quietly weakens the group check too.
+
+That is the argument for the scope check running before collection and for the
+end-of-run warning when any read failed. A partial report that looks complete is the
+worst output this tool can produce.
 
 **Do not pass `-Scopes` with a custom `-ClientId`.** MSAL treats requested scopes on a
 custom app registration as a new authorization and triggers a consent prompt. The token
@@ -370,6 +381,41 @@ The scope check is conditional. `Group.Read.All` and `User.Read.All` are only re
 when `-GroupOwnerUpns` is supplied, so an Intune-only run does not warn about them.
 Warning about permissions a run does not need is the same failure mode as warning
 spam: it trains the operator to ignore warnings.
+
+---
+
+## The settings file
+
+Identifiers and preferences live in `%APPDATA%\IntuneHousekeeper\settings.json`, written
+by `Set-IntuneHousekeeperConfig`. Four decisions in it are worth explaining.
+
+**Nothing secret is stored, and nothing secret ever should be.** Sign-in uses a public
+client flow, which has no secret, so there is nothing to put there. If someone later adds
+certificate or client-secret support, that credential does not belong in this file: a
+settings file holding a credential is a credential store with none of the protections one
+needs, and it will end up in a screenshot or a repository.
+
+**`-ClientId` and `-TenantId` are not `Mandatory`.** Mandatory binding happens before the
+function body runs, so the binder would prompt for exactly the values the settings file
+already holds, which defeats the point. They are ordinary optional parameters, checked
+after the merge, and the error names `Set-IntuneHousekeeperConfig`. The cost is the
+`HelpMessage` prompt text, which only ever appeared at the mandatory prompt. An error
+message everyone sees is worth more than prompt guidance most people never trigger.
+
+**Precedence is explicit parameter, then stored value, then default, decided with
+`$PSBoundParameters`.** Nothing else can distinguish `-NewAppGraceMonths 6` from the
+default of 6, because a parameter with a default always has a value. Get this wrong and a
+saved setting silently overrides what the operator just typed, in a tool whose output is
+a deletion queue.
+
+**A stored `0` or empty string is a setting, not an absence.** `"NewAppGraceMonths": 0`
+means no grace window and `"TestNameRegex": ""` means detection off; only a missing key
+falls through to the default. The file is written sparsely for that reason, holding only
+the keys that have been set.
+
+A stored value is assigned through the parameter variable, which re-applies its type and
+any `ValidateRange`, so a hand-edited file with an impossible value fails with a message
+naming the file and the setting rather than misbehaving later.
 
 ---
 

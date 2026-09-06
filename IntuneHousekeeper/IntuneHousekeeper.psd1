@@ -18,7 +18,11 @@
         @{ ModuleName = 'ImportExcel';                    ModuleVersion = '7.8.0'  }
     )
 
-    FunctionsToExport    = @('Export-IntuneHousekeeperReport')
+    FunctionsToExport    = @(
+        'Export-IntuneHousekeeperReport'
+        'Get-IntuneHousekeeperConfig'
+        'Set-IntuneHousekeeperConfig'
+    )
     CmdletsToExport      = @()
     VariablesToExport    = @()
     AliasesToExport      = @()

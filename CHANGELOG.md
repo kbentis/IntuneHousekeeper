@@ -21,6 +21,13 @@ objects. Changes worth recording because each came from something the tool got w
 - PowerShell 7 is required. Windows PowerShell 5.1 fails at sign-in on any machine with
   several Microsoft.Graph module versions installed.
 - An existing Graph session is reused, and only a session the script opened is closed.
+- `DeviceManagementScripts.Read.All` documented and checked. Without it, remediations and
+  platform scripts return 403 and come back empty while the rest of the report looks fine.
+- A run where any Graph read failed now warns clearly that the report is incomplete,
+  rather than only recording it on the RunInfo sheet.
+- Settings file support. `Set-IntuneHousekeeperConfig` saves identifiers and
+  preferences, `Get-IntuneHousekeeperConfig` shows them, and the report command reads
+  them. Explicit parameters still win.
 - Packaged as a module. `Install-Module IntuneHousekeeper`, then
   `Export-IntuneHousekeeperReport`. Dependencies are declared in the manifest rather
   than checked at runtime.

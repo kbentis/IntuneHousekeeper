@@ -85,6 +85,18 @@ These are not preferences. Breaking any of them breaks the tool.
 - Retained-version detection must fail toward keeping. Requiring a parseable version and
   an assigned newer sibling is deliberate; loosening either risks recommending deletion
   of a live rollback copy.
+- The settings file holds identifiers and preferences only. No client secret, no
+  certificate, no token. A settings file that holds a credential is a credential store
+  without any of the protections one needs, and the public client flow means there is
+  nothing to put there anyway.
+- Settings precedence is explicit parameter, then settings file, then default, decided
+  with `$PSBoundParameters`. A parameter with a default always has a value, so nothing
+  else can distinguish `-NewAppGraceMonths 6` from the default of 6. Getting this wrong
+  lets a saved value silently override what the operator just typed.
+- A stored `0` or empty string is a setting, not an absence. Only a missing key falls
+  through to the default.
+- `-ClientId` and `-TenantId` must not be `Mandatory`: binding happens before the
+  function body runs, so the prompt would fire for values the settings file already has.
 - `-NewAppGraceMonths` is the operator's call, including `0`. Do not reintroduce a
   hardcoded assumption about how long retained application versions live.
 - No naming convention ships with a default. `-TestNameRegex` and `-GroupNamePrefix` are

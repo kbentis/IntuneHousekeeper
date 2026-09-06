@@ -91,25 +91,25 @@ on a normal enterprise workstation: identical command, 5.1 failed, 7 worked.
 Register your own app rather than consenting broad scopes to the shared Microsoft Graph
 PowerShell app.
 
-1. **App registrations > New registration.** Single tenant. Under **Redirect URI**,
-   choose **Public client/native** and enter `http://localhost`.
-2. **Authentication > Add a platform > Mobile and desktop applications.** Add
-   `ms-appx-web://Microsoft.AAD.BrokerPlugin/<client id>`. This is required for broker
-   (WAM) sign-in, which any tenant enforcing Conditional Access token protection needs.
-3. If you run **Windows PowerShell 5.1**, also tick
-   `https://login.microsoftonline.com/common/oauth2/nativeclient`.
-4. **API permissions.** Add these as **delegated** Microsoft Graph permissions and grant
+1. **App registrations > New registration.** Single tenant. No redirect URI is needed at
+   this stage.
+2. **Authentication > Add Redirect URI > Mobile and desktop applications.** Add both:
+   - `ms-appx-web://Microsoft.AAD.BrokerPlugin/<client id>`, required for broker (WAM)
+     sign-in, which any tenant enforcing Conditional Access token protection needs
+   - `http://localhost`
+3. **API permissions.** Add these as **delegated** Microsoft Graph permissions and grant
    admin consent:
 
   | Permission | Used for |
   |---|---|
   | `DeviceManagementApps.Read.All` | Applications and their assignments |
-  | `DeviceManagementConfiguration.Read.All` | Profiles, compliance, baselines, scripts |
+  | `DeviceManagementConfiguration.Read.All` | Profiles, compliance policies, baselines |
+  | `DeviceManagementScripts.Read.All` | Remediations, platform scripts, and the macOS scripts read for group references |
   | `Group.Read.All` | Entra group details and membership (optional section only) |
   | `User.Read.All` | Resolving owner accounts and their groups (optional section only) |
 
 The last two are only needed if you use `-GroupOwnerUpns`. On a run without it, the
-script neither expects nor warns about them.
+module neither expects nor warns about them.
 
 **Use read-only scopes.** A `ReadWrite` grant satisfies the matching `Read` requirement
 and the script accepts it without complaint, but a registration consented for
@@ -173,8 +173,34 @@ Export-IntuneHousekeeperReport -ClientId "<app id>" -TenantId "<tenant id>" `
     -GroupNamePrefix "<your-prefix>-"
 ```
 
-The module exports one command. `Get-Help Export-IntuneHousekeeperReport -Examples`
-prints seven worked examples.
+### Save your settings instead of retyping them
+
+```powershell
+Set-IntuneHousekeeperConfig -ClientId "<app id>" -TenantId "<tenant id>" `
+    -TestNameRegex '(^|[-_ (\[])TEST([-_ )\]]|$)' -OutputFolder 'C:\Reports\Intune'
+
+Export-IntuneHousekeeperReport
+```
+
+Settings are written to `%APPDATA%\IntuneHousekeeper\settings.json`, or wherever
+`-ConfigPath` points, and only the values you pass are stored. `Get-IntuneHousekeeperConfig`
+shows what is saved and where; `Set-IntuneHousekeeperConfig -RemoveSetting <name>` clears
+one.
+
+Precedence is **explicit parameter, then settings file, then default**, so a value passed
+on the command line always wins for that run without changing what is saved. A stored `0`
+or `""` is a real setting, not an absent one: `"NewAppGraceMonths": 0` means no grace
+window, while the key being missing means use the default.
+
+`ClientId` and `TenantId` are the only required values, from either source. Without them
+the command stops with a message telling you how to save them, rather than prompting.
+
+Nothing secret is stored. The tool signs in through a public client flow, which has no
+secret, so the file holds identifiers and preferences only. It still identifies your
+tenant, so keep it out of repositories and screenshots.
+
+The module exports three commands. `Get-Help Export-IntuneHousekeeperReport -Examples`
+prints eight worked examples.
 
 If you connect to Graph yourself first, the command reuses that session and leaves it
 open. Otherwise it signs in and disconnects when it finishes.
@@ -195,8 +221,9 @@ to find the value.
 
 | Parameter | Default | Purpose |
 |---|---|---|
-| `-ClientId` | required | App registration client ID |
-| `-TenantId` | required | Tenant ID |
+| `-ClientId` | required | App registration client ID. From this parameter or the settings file |
+| `-TenantId` | required | Tenant ID. From this parameter or the settings file |
+| `-ConfigPath` | `%APPDATA%\IntuneHousekeeper\settings.json` | Settings file to read |
 | `-OutputFolder` | `~\Documents` | Where the workbook is written |
 | `-NewAppGraceMonths` | `6` | Unassigned apps created within this many months are parked as `Watch`. `0` flags every unassigned app. Range 0-120 |
 | `-RetainedVersionMonths` | `12` | How long a name-matched previous version stays out of the cleanup queue. `0` queues every retained copy. Range 0-120 |
@@ -288,7 +315,8 @@ tool that describes something actually reaching devices, so it is worth setting
 correctly.
 
 **Anchor the pattern.** A bare `test` also matches `Latest`, `Attestation` and
-`Protest`. Flagging a Device Health Attestation policy on All
+`Protest`. In one real tenant, 75 object names contained the substring and 53 of those
+were Latest or Attestation objects. Flagging a Device Health Attestation policy on All
 Devices as a leftover test object would put a `High` row in front of you that is
 completely wrong. The word-boundary form above matches `Wifi-TEST`, `Wifi_TEST`,
 `Wifi TEST` and `Wifi (test)` while leaving all of those alone.

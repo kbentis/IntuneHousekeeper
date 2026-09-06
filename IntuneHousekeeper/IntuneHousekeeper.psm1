@@ -17,6 +17,7 @@ $script:ConnectionOwned       = $false
 $script:ObjectsExamined       = 0
 $script:TestNameMatches       = 0
 $script:GraphAuthVersion      = $null
+$script:ConfigPathUsed        = $null
 
 function Reset-RunState {
     $script:AllReferencedGroupIds = [System.Collections.Generic.HashSet[string]]::new()
@@ -26,6 +27,179 @@ function Reset-RunState {
     $script:ObjectsExamined       = 0
     $script:TestNameMatches       = 0
     $script:GraphAuthVersion      = $null
+    $script:ConfigPathUsed        = $null
+}
+
+
+# ---------------------------------------------------------------------------
+# Settings file
+# ---------------------------------------------------------------------------
+# Identifiers and preferences only. There is nothing else to store: the tool signs in
+# through a public client flow, which has no secret. If a future change ever needs one,
+# it does not belong in this file, because a settings file that holds a credential is a
+# credential store with none of the protections one needs.
+
+$script:ConfigSettingNames = @(
+    'ClientId'
+    'TenantId'
+    'OutputFolder'
+    'NewAppGraceMonths'
+    'RetainedVersionMonths'
+    'TestNameRegex'
+    'GroupNamePrefix'
+    'GroupOwnerUpns'
+    'HeaderColor'
+)
+
+function Get-DefaultConfigPath {
+    $base = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $HOME '.config' }
+    return (Join-Path (Join-Path $base 'IntuneHousekeeper') 'settings.json')
+}
+
+function Read-ConfigFile {
+    # Returns a hashtable of stored settings, empty when there is no file. A key that is
+    # present wins even when its value is 0 or an empty string, because both are
+    # meaningful settings: 0 disables a window, '' disables test detection. Only an
+    # absent key falls through to the parameter default.
+    param([string]$Path)
+    $result = @{}
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $result }
+    try {
+        $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        if (-not $raw.Trim()) { return $result }
+        $json = $raw | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw ("Settings file '{0}' could not be read: {1}" -f $Path, $_.Exception.Message)
+    }
+    foreach ($name in $script:ConfigSettingNames) {
+        if (($json.PSObject.Properties.Name -contains $name) -and ($null -ne $json.$name)) {
+            $result[$name] = $json.$name
+        }
+    }
+    return $result
+}
+
+function Get-IntuneHousekeeperConfig {
+    <#
+    .SYNOPSIS
+        Reads the saved Intune Housekeeper settings.
+
+    .DESCRIPTION
+        Returns the settings currently stored, along with the path they were read from.
+        Every setting is optional and only the ones that have been set are present, so an
+        unset value falls through to the command's own default.
+
+    .PARAMETER ConfigPath
+        Settings file to read. Defaults to
+        %APPDATA%\IntuneHousekeeper\settings.json.
+
+    .EXAMPLE
+        Get-IntuneHousekeeperConfig
+
+        Shows what is stored, and where.
+    #>
+    [CmdletBinding()]
+    param([string]$ConfigPath)
+
+    if (-not $ConfigPath) { $ConfigPath = Get-DefaultConfigPath }
+    $stored = Read-ConfigFile -Path $ConfigPath
+
+    $out = [ordered]@{ Path = $ConfigPath; Exists = (Test-Path -LiteralPath $ConfigPath) }
+    foreach ($name in $script:ConfigSettingNames) {
+        $out[$name] = $(if ($stored.ContainsKey($name)) { $stored[$name] } else { $null })
+    }
+    return [pscustomobject]$out
+}
+
+function Set-IntuneHousekeeperConfig {
+    <#
+    .SYNOPSIS
+        Saves Intune Housekeeper settings so they do not have to be typed each run.
+
+    .DESCRIPTION
+        Writes only the settings you pass, leaving anything already stored untouched.
+        Values are validated on save, so a malformed regex or an out-of-range month count
+        fails here rather than part way through a run three weeks later.
+
+        Nothing secret is stored. The tool signs in through a public client flow, so the
+        file holds identifiers and preferences only.
+
+    .PARAMETER RemoveSetting
+        Names of settings to delete from the file, returning them to their defaults.
+
+    .PARAMETER ConfigPath
+        Settings file to write. Defaults to
+        %APPDATA%\IntuneHousekeeper\settings.json. The folder is created if needed.
+
+    .PARAMETER PassThru
+        Return the resulting settings.
+
+    .EXAMPLE
+        Set-IntuneHousekeeperConfig -ClientId "<app id>" -TenantId "<tenant id>"
+
+        Stores the identifiers, so later runs need no parameters at all.
+
+    .EXAMPLE
+        Set-IntuneHousekeeperConfig -TestNameRegex '(^|[-_ (\[])TEST([-_ )\]]|$)' -OutputFolder 'C:\Reports\Intune'
+
+        Adds a naming convention and an output folder to whatever is already stored.
+
+    .EXAMPLE
+        Set-IntuneHousekeeperConfig -RemoveSetting GroupOwnerUpns, GroupNamePrefix
+
+        Stops the Entra group section running by default.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [string]   $ClientId,
+        [string]   $TenantId,
+        [string]   $OutputFolder,
+        [ValidateRange(0, 120)]
+        [int]      $NewAppGraceMonths,
+        [ValidateRange(0, 120)]
+        [int]      $RetainedVersionMonths,
+        [string]   $TestNameRegex,
+        [string]   $GroupNamePrefix,
+        [string[]] $GroupOwnerUpns,
+        [string]   $HeaderColor,
+        [string[]] $RemoveSetting,
+        [string]   $ConfigPath,
+        [switch]   $PassThru
+    )
+
+    if (-not $ConfigPath) { $ConfigPath = Get-DefaultConfigPath }
+
+    if ($PSBoundParameters.ContainsKey('TestNameRegex') -and $TestNameRegex) {
+        try { $null = [regex]::new($TestNameRegex) }
+        catch { throw ("-TestNameRegex is not a valid regular expression: {0}" -f $_.Exception.Message) }
+    }
+    foreach ($bad in ($RemoveSetting | Where-Object { $_ -and ($script:ConfigSettingNames -notcontains $_) })) {
+        throw ("'{0}' is not a setting. Valid names: {1}" -f $bad, ($script:ConfigSettingNames -join ', '))
+    }
+
+    $stored = Read-ConfigFile -Path $ConfigPath
+    foreach ($name in $script:ConfigSettingNames) {
+        if ($PSBoundParameters.ContainsKey($name)) { $stored[$name] = $PSBoundParameters[$name] }
+    }
+    foreach ($name in $RemoveSetting) { if ($stored.ContainsKey($name)) { [void]$stored.Remove($name) } }
+
+    $ordered = [ordered]@{}
+    foreach ($name in $script:ConfigSettingNames) {
+        if ($stored.ContainsKey($name)) { $ordered[$name] = $stored[$name] }
+    }
+
+    if ($PSCmdlet.ShouldProcess($ConfigPath, 'Write Intune Housekeeper settings')) {
+        $folder = Split-Path -Parent $ConfigPath
+        if ($folder -and -not (Test-Path -LiteralPath $folder)) {
+            $null = New-Item -ItemType Directory -Path $folder -Force
+        }
+        ([pscustomobject]$ordered | ConvertTo-Json -Depth 4) |
+            Set-Content -LiteralPath $ConfigPath -Encoding UTF8
+        Write-Host ("Settings written to {0}" -f $ConfigPath)
+    }
+
+    if ($PassThru) { Get-IntuneHousekeeperConfig -ConfigPath $ConfigPath }
 }
 
 # ---------------------------------------------------------------------------
@@ -571,11 +745,17 @@ function Export-IntuneHousekeeperReport {
                                   establish references. Still verify in the portal: any
                                   object type Microsoft adds is invisible until added here
 
+    .PARAMETER ConfigPath
+        Settings file to read, written by Set-IntuneHousekeeperConfig. Defaults to
+        %APPDATA%\IntuneHousekeeper\settings.json. Explicit parameters win over stored
+        values, and a stored value wins over the parameter default.
+
     .PARAMETER ClientId
         Client ID of your own Entra app registration (public client / native flow enabled).
+        Required, from this parameter or from the settings file.
 
     .PARAMETER TenantId
-        Directory (tenant) ID.
+        Directory (tenant) ID. Required, from this parameter or from the settings file.
 
     .PARAMETER OutputFolder
         Folder the workbook is written to. Created if missing.
@@ -670,18 +850,28 @@ function Export-IntuneHousekeeperReport {
         Everything switched on, with a shorter grace window for unassigned applications.
         This is the shape of a regular review run.
 
+    .EXAMPLE
+            Set-IntuneHousekeeperConfig -ClientId "<app id>" -TenantId "<tenant id>" `
+                -TestNameRegex '(^|[-_ (\[])TEST([-_ )\]]|$)'
+            Export-IntuneHousekeeperReport
+
+        Save once, then run with no parameters at all. Anything passed explicitly on a
+        later run overrides the stored value for that run only.
+
     .NOTES
         Required delegated permissions on the app registration, admin-consented:
           DeviceManagementApps.Read.All            applications and their assignments
-          DeviceManagementConfiguration.Read.All   profiles, compliance, baselines, scripts
+          DeviceManagementConfiguration.Read.All   profiles, compliance, baselines
+          DeviceManagementScripts.Read.All         remediations, platform scripts, and the
+                                                   macOS scripts read for group references
           Group.Read.All                           Entra group section only
           User.Read.All                            Entra group section only
 
-        App registration: public client / native flow, redirect URI http://localhost. For
-        broker (WAM) sign-in, which a tenant enforcing Conditional Access token protection
-        requires, also add ms-appx-web://Microsoft.AAD.BrokerPlugin/<client id> under Mobile
-        and desktop applications. On Windows PowerShell 5.1 also add
-        https://login.microsoftonline.com/common/oauth2/nativeclient.
+        App registration: public client / native flow. Under Authentication, Add Redirect
+        URI, Mobile and desktop applications, add both
+        ms-appx-web://Microsoft.AAD.BrokerPlugin/<client id> and http://localhost. The
+        first is required for broker (WAM) sign-in, which a tenant enforcing Conditional
+        Access token protection needs.
 
         Broker sign-in is enabled by default on Windows in current releases of
         Microsoft.Graph.Authentication and no longer needs to be turned on in code. If a
@@ -717,13 +907,14 @@ function Export-IntuneHousekeeperReport {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true,
-                   HelpMessage = 'Application (client) ID of your own Entra app registration. Entra admin center > App registrations > your app > Overview.')]
+        # Not mandatory, because mandatory binding happens before this function runs and
+        # would prompt for a value the settings file already holds. Both are checked
+        # after the settings merge, with a message naming Set-IntuneHousekeeperConfig.
         [string]   $ClientId,
-
-        [Parameter(Mandatory = $true,
-                   HelpMessage = 'Directory (tenant) ID. Same Overview page as the client ID, or Entra admin center > Overview.')]
         [string]   $TenantId,
+
+        # Settings file to read. Explicit parameters always win over stored values.
+        [string]   $ConfigPath,
 
         # Completes existing directories as you type, so the folder is right before the run
         # starts rather than after sign-in.
@@ -778,6 +969,30 @@ function Export-IntuneHousekeeperReport {
     )
 
     Reset-RunState
+
+    # Settings precedence: an explicit parameter beats the settings file, which beats the
+    # parameter default. $PSBoundParameters is the only way to tell '-NewAppGraceMonths 6'
+    # from the default of 6, and getting that wrong would let a saved setting silently
+    # override what the operator just typed.
+    if (-not $ConfigPath) { $ConfigPath = Get-DefaultConfigPath }
+    $script:ConfigPathUsed = $ConfigPath
+    $stored = Read-ConfigFile -Path $ConfigPath
+    foreach ($name in $script:ConfigSettingNames) {
+        if ($PSBoundParameters.ContainsKey($name)) { continue }
+        if (-not $stored.ContainsKey($name))       { continue }
+        try {
+            # Assigning through the parameter variable re-applies its type and any
+            # ValidateRange attribute, so a bad stored value is caught here.
+            Set-Variable -Name $name -Value $stored[$name] -Scope 0 -ErrorAction Stop
+        }
+        catch {
+            throw ("Setting '{0}' in '{1}' is not valid: {2}" -f $name, $ConfigPath, $_.Exception.Message)
+        }
+    }
+
+    if (-not $ClientId -or -not $TenantId) {
+        throw "ClientId and TenantId are required. Pass -ClientId and -TenantId, or save them once with: Set-IntuneHousekeeperConfig -ClientId '<app id>' -TenantId '<tenant id>'. Both are on the Overview page of your app registration in the Entra admin center."
+    }
 
     # Fail early on a malformed pattern rather than part way through the inventory. An
     # empty -TestNameRegex is valid and means the operator has not supplied a naming
@@ -876,6 +1091,9 @@ function Export-IntuneHousekeeperReport {
         $neededScopes = [System.Collections.Generic.List[string]]::new()
         $neededScopes.Add('DeviceManagementApps.Read.All')
         $neededScopes.Add('DeviceManagementConfiguration.Read.All')
+        # Remediations and platform scripts sit behind their own permission, and it also
+        # covers the macOS shell and custom attribute scripts read for group references.
+        $neededScopes.Add('DeviceManagementScripts.Read.All')
         if ($GroupOwnerUpns.Count -gt 0) {
             $neededScopes.Add('Group.Read.All')
             $neededScopes.Add('User.Read.All')
@@ -1130,6 +1348,7 @@ function Export-IntuneHousekeeperReport {
         $runInfo.Add([pscustomobject][ordered]@{ Setting='RetainedVersionMonths'; Value=$(if ($RetainedVersionMonths -eq 0) { '0 - retained copies not excused' } else { [string]$RetainedVersionMonths }) })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='GroupNamePrefix';      Value=$(if ($GroupNamePrefix) { $GroupNamePrefix } else { '(not set)' }) })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='Group owners checked'; Value=[string]$GroupOwnerUpns.Count })
+        $runInfo.Add([pscustomobject][ordered]@{ Setting='Settings file';         Value=$(if ($script:ConfigPathUsed -and (Test-Path -LiteralPath $script:ConfigPathUsed)) { $script:ConfigPathUsed } else { '(none - parameters only)' }) })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='PowerShell';            Value=[string]$PSVersionTable.PSVersion })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='Graph auth module';     Value=[string]$script:GraphAuthVersion })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='Collection complete';   Value=$(if ($script:GraphReadIncomplete) { 'No - at least one Graph read failed' } else { 'Yes' }) })
@@ -1321,6 +1540,10 @@ function Export-IntuneHousekeeperReport {
         Write-Host ''
         Write-UnrecognisedTypeWarning
 
+    if ($script:GraphReadIncomplete) {
+        Write-Warning 'This report is INCOMPLETE. At least one Graph read failed (see the warnings above), so one or more categories are missing objects and their totals understate the estate. A 403 usually means the app registration is missing a permission listed in the README. RunInfo records this on the Collection complete row.'
+    }
+
         if ($TestNameRegex) {
             Write-Host ("Test-object detection: {0} of {1} object names matched '{2}'." -f $script:TestNameMatches, $script:ObjectsExamined, $TestNameRegex)
             if ($script:TestNameMatches -eq 0) {
@@ -1372,4 +1595,8 @@ function Export-IntuneHousekeeperReport {
 
 }
 
-Export-ModuleMember -Function 'Export-IntuneHousekeeperReport'
+Export-ModuleMember -Function @(
+    'Export-IntuneHousekeeperReport'
+    'Get-IntuneHousekeeperConfig'
+    'Set-IntuneHousekeeperConfig'
+)
