@@ -146,6 +146,25 @@ intent (everything that is not an app) fall into a single bucket and behave as b
 This was caught by a human reviewing a flagged item against the portal. It is the best
 argument in the whole project for keeping a person in the loop.
 
+**How rare is this?** The Intune portal now prevents it: pick a group as an include and
+it is greyed out in the exclude list for the same assignment. So the check cannot fire on
+anything created the normal way. What it can still catch is an assignment created through
+Graph directly, which is how automation creates them and where nobody is watching, and
+legacy configuration predating the portal validation.
+
+That makes it defensive rather than routine, and it is kept for that reason: the cost is
+one comparison per object, and the failure it describes is silent. An assignment that
+targets nothing looks healthy in every view Intune offers.
+
+The same applies to `OnlyExclusions`. The portal refuses to save an assignment that has
+exclusions and no includes: "At least one group must be included when excluded groups
+were selected." So that state, too, comes from Graph or from history rather than from
+someone clicking through a wizard today.
+
+Both flags are therefore worth least in a tenant built recently through the portal, and
+worth most in one with years of accumulated configuration and tooling that assigns
+objects programmatically. That is the estate this tool is for, so both stay.
+
 ---
 
 ## Unassigned applications and the grace window

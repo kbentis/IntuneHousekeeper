@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 $script:AllReferencedGroupIds = [System.Collections.Generic.HashSet[string]]::new()
 $script:UnrecognisedTypes     = @{}
 $script:GraphReadIncomplete   = $false
+$script:ReferenceReadIncomplete = $false
 $script:ConnectionOwned       = $false
 $script:ObjectsExamined       = 0
 $script:TestNameMatches       = 0
@@ -23,6 +24,7 @@ function Reset-RunState {
     $script:AllReferencedGroupIds = [System.Collections.Generic.HashSet[string]]::new()
     $script:UnrecognisedTypes     = @{}
     $script:GraphReadIncomplete   = $false
+    $script:ReferenceReadIncomplete = $false
     $script:ConnectionOwned       = $false
     $script:ObjectsExamined       = 0
     $script:TestNameMatches       = 0
@@ -289,9 +291,19 @@ function Add-ReferenceOnlyGroups {
     # failure here marks the collection incomplete, which skips that section: a partial
     # reference set makes 'nothing references this group' unsafe to assert.
     Write-Host 'Collecting group references from object types outside the report...'
+    # A failure here says nothing about the inventory: these endpoints are never reported
+    # on. It only means the referenced-group set is partial, which disables the group
+    # section. Keeping the two apart stops a complete Windows inventory being stamped
+    # INCOMPLETE because Autopilot could not be read.
+    $inventoryStateBefore = $script:GraphReadIncomplete
     foreach ($e in $script:ReferenceOnlyEndpoints) {
         $objects = Invoke-GraphPaged -Uri ("https://graph.microsoft.com/beta/{0}?`$expand=assignments" -f $e)
         foreach ($o in $objects) { Add-AssignmentGroupReference $o.assignments }
+    }
+    if ($script:GraphReadIncomplete -ne $inventoryStateBefore) {
+        $script:ReferenceReadIncomplete = $true
+        $script:GraphReadIncomplete     = $inventoryStateBefore
+        Write-Warning 'The failures above are on object types read only to establish group references, so the Windows inventory is unaffected. Autopilot profiles and enrolment configurations need DeviceManagementServiceConfig.Read.All; scripts need DeviceManagementScripts.Read.All. Without them the Entra group section cannot run safely and is skipped.'
     }
 }
 
@@ -880,6 +892,9 @@ function Export-IntuneHousekeeperReport {
                                                    check
           Group.Read.All                           Entra group section only
           User.Read.All                            Entra group section only
+          DeviceManagementServiceConfig.Read.All   Entra group section only: Autopilot and
+                                                   enrolment configurations are read for
+                                                   their group references
 
         App registration: public client / native flow. Under Authentication, Add Redirect
         URI, Mobile and desktop applications, add both
@@ -1111,6 +1126,10 @@ function Export-IntuneHousekeeperReport {
         if ($GroupOwnerUpns.Count -gt 0) {
             $neededScopes.Add('Group.Read.All')
             $neededScopes.Add('User.Read.All')
+            # Autopilot profiles and enrolment configurations are read only to establish
+            # group references, and they sit behind their own permission. Without it those
+            # reads fail, the reference set is incomplete, and the section refuses to run.
+            $neededScopes.Add('DeviceManagementServiceConfig.Read.All')
         }
         $missingScopes = [System.Collections.Generic.List[string]]::new()
         foreach ($needed in $neededScopes) {
@@ -1267,13 +1286,18 @@ function Export-IntuneHousekeeperReport {
         if ($GroupOwnerUpns.Count -gt 0) { Add-ReferenceOnlyGroups }
 
         Write-Host 'Collecting owner-scoped Entra ID groups...'
-        if ($script:GraphReadIncomplete -and $GroupOwnerUpns.Count -gt 0) {
-            Write-Warning 'Entra group analysis skipped: at least one Graph read failed, so the set of referenced groups is incomplete. A group could be reported as unreferenced only because the assignment naming it was never read. Re-run once the failure above is resolved.'
+        # One reason, accurate. An earlier version emptied -GroupOwnerUpns to disable the
+        # section, which then reported 'no -GroupOwnerUpns supplied' to an operator who
+        # had supplied it.
+        $groupSkipReason = ''
+        if ($GroupOwnerUpns.Count -eq 0) {
+            $groupSkipReason = 'no -GroupOwnerUpns supplied. Pass the owner accounts whose assignment groups you want checked.'
+        }
+        elseif ($script:GraphReadIncomplete -or $script:ReferenceReadIncomplete) {
+            $groupSkipReason = 'at least one Graph read failed, so the set of referenced groups is incomplete. A group could be reported as unreferenced only because the assignment naming it was never read. Resolve the failure above and re-run.'
             $GroupOwnerUpns = @()
         }
-        if ($GroupOwnerUpns.Count -eq 0) {
-            Write-Host '  Skipped: no -GroupOwnerUpns supplied. Pass the owner accounts whose assignment groups you want checked.'
-        }
+        if ($groupSkipReason) { Write-Host ("  Skipped: {0}" -f $groupSkipReason) }
         $ownedGroups = @{}
         foreach ($upn in $GroupOwnerUpns) {
             $u = Invoke-GraphPaged -Uri "https://graph.microsoft.com/v1.0/users?`$filter=userPrincipalName eq '$upn'&`$select=id,userPrincipalName"
@@ -1377,7 +1401,8 @@ function Export-IntuneHousekeeperReport {
         $runInfo.Add([pscustomobject][ordered]@{ Setting='Settings file';         Value=$(if ($script:ConfigPathUsed -and (Test-Path -LiteralPath $script:ConfigPathUsed)) { $script:ConfigPathUsed } else { '(none - parameters only)' }) })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='PowerShell';            Value=[string]$PSVersionTable.PSVersion })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='Graph auth module';     Value=[string]$script:GraphAuthVersion })
-        $runInfo.Add([pscustomobject][ordered]@{ Setting='Collection complete';   Value=$(if ($script:GraphReadIncomplete) { 'No - at least one Graph read failed' } else { 'Yes' }) })
+        $runInfo.Add([pscustomobject][ordered]@{ Setting='Collection complete';   Value=$(if ($script:GraphReadIncomplete) { 'No - a read failed on a reported object type' } else { 'Yes' }) })
+        $runInfo.Add([pscustomobject][ordered]@{ Setting='Group references';      Value=$(if ($script:ReferenceReadIncomplete) { 'Incomplete - group section skipped' } elseif ($GroupOwnerUpns.Count -eq 0) { 'Not collected - group section not requested' } else { 'Complete' }) })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='Actionable means';      Value='High + Medium. Low and Watch are excluded.' })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='Test names matched';    Value=$(if ($TestNameRegex) { ('{0} of {1} object names' -f $script:TestNameMatches, $script:ObjectsExamined) } else { 'detection not enabled' }) })
 
@@ -1522,7 +1547,16 @@ function Export-IntuneHousekeeperReport {
 
         Write-Host 'Writing Excel tracker...'
         $pkg = $summary                       | Export-Excel -Path $xlsx -WorksheetName 'Summary'                 @common
-        $pkg = $runInfo                       | Export-Excel -ExcelPackage $pkg -WorksheetName 'RunInfo'            @common
+        # RunInfo values are labels, and several of them look numeric. In a locale where
+        # '.' is a thousands separator, the export turns the version string 7.6.5 into
+        # 765 and 2.39.0 into 2390 before any cell formatting is applied. Suppressing the
+        # conversion is the only fix; the parameter is checked first so an older
+        # ImportExcel still works, just with the mangling.
+        $runInfoOpts = @{}
+        if ((Get-Command Export-Excel).Parameters.ContainsKey('NoNumberConversion')) {
+            $runInfoOpts['NoNumberConversion'] = '*'
+        }
+        $pkg = $runInfo                       | Export-Excel -ExcelPackage $pkg -WorksheetName 'RunInfo'            @common @runInfoOpts
         $pkg = (Get-ExportRows $worklist -Worklist) | Export-Excel -ExcelPackage $pkg -WorksheetName 'Worklist'           @common
         $pkg = (Get-ExportRows $rowsApps)        | Export-Excel -ExcelPackage $pkg -WorksheetName 'Applications'       @common
         $pkg = (Get-ExportRows $rowsConfig)      | Export-Excel -ExcelPackage $pkg -WorksheetName 'ConfigProfiles'     @common
@@ -1567,7 +1601,10 @@ function Export-IntuneHousekeeperReport {
         Write-UnrecognisedTypeWarning
 
     if ($script:GraphReadIncomplete) {
-        Write-Warning 'This report is INCOMPLETE. At least one Graph read failed (see the warnings above), so one or more categories are missing objects and their totals understate the estate. A 403 usually means the app registration is missing a permission listed in the README. RunInfo records this on the Collection complete row.'
+        Write-Warning 'This report is INCOMPLETE. A read failed on an object type the report covers (see the warnings above), so one or more categories are missing objects and their totals understate the estate. A 403 usually means the app registration is missing a permission listed in the README. RunInfo records this on the Collection complete row.'
+    }
+    elseif ($script:ReferenceReadIncomplete) {
+        Write-Warning 'The Windows inventory is complete, but the Entra group section was skipped: a read failed on an object type used only to establish group references. Everything else in this workbook is trustworthy.'
     }
 
         if ($TestNameRegex) {

@@ -107,9 +107,12 @@ PowerShell app.
   | `DeviceManagementScripts.Read.All` | Remediations, platform scripts, and script assignments read for the group check |
   | `Group.Read.All` | Entra group details and membership (optional section only) |
   | `User.Read.All` | Resolving owner accounts and their groups (optional section only) |
+  | `DeviceManagementServiceConfig.Read.All` | Autopilot and enrolment configurations, read for their group references (optional section only) |
 
-The last two are only needed if you use `-GroupOwnerUpns`. On a run without it, the
-module neither expects nor warns about them.
+The last three are only needed if you use `-GroupOwnerUpns`. On a run without it, the
+module neither expects nor warns about them. If any of them is missing when the section
+does run, the reference set is incomplete and the section is skipped rather than reported
+from partial data.
 
 **Use read-only scopes.** A `ReadWrite` grant satisfies the matching `Read` requirement
 and the script accepts it without complaint, but a registration consented for
