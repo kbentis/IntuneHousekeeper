@@ -38,7 +38,9 @@ jobs:
         run: |
           # The safety property of this tool is that running it cannot change anything.
           # Any -Method other than GET fails the build.
-          $hits = Select-String -Path .\*.ps1, .\*.psm1 -Pattern '-Method\s+(\w+)' -AllMatches -ErrorAction SilentlyContinue
+          $files = Get-ChildItem -Path . -Recurse -File |
+                   Where-Object { $_.Extension -in '.ps1', '.psm1' }
+          $hits = Select-String -Path $files.FullName -Pattern '-Method\s+(\w+)' -AllMatches -ErrorAction SilentlyContinue
           $bad = @()
           foreach ($h in $hits) {
             foreach ($m in $h.Matches) {
@@ -82,6 +84,28 @@ jobs:
           }
           if ($failed) { exit 1 }
           Write-Host 'Parses clean under Windows PowerShell 5.1.'
+
+      - name: Module manifest
+        shell: pwsh
+        run: |
+          $m = Test-ModuleManifest ./IntuneHousekeeper/IntuneHousekeeper.psd1
+          Write-Host ("{0} {1}, requires PowerShell {2}, exports: {3}" -f `
+              $m.Name, $m.Version, $m.PowerShellVersion, ($m.ExportedFunctions.Keys -join ', '))
+          if ($m.ExportedFunctions.Count -eq 0) { Write-Host '::error::The manifest exports no functions.'; exit 1 }
+
+      - name: Import the module for real
+        shell: pwsh
+        run: |
+          # Installs the declared dependencies and loads the module, which is the only
+          # way to catch a manifest that is valid but wired up wrong.
+          Install-Module Microsoft.Graph.Authentication, ImportExcel -Force -Scope CurrentUser -SkipPublisherCheck -ErrorAction Stop
+          $env:PSModulePath = (Resolve-Path .).Path + [IO.Path]::PathSeparator + $env:PSModulePath
+          Import-Module IntuneHousekeeper -Force -ErrorAction Stop
+          $cmds = Get-Command -Module IntuneHousekeeper
+          Write-Host ("Imported. Commands: {0}" -f ($cmds.Name -join ', '))
+          if (-not (Get-Help Export-IntuneHousekeeperReport).Synopsis) {
+            Write-Host '::error::Comment-based help did not bind to the exported function.'; exit 1
+          }
 
       - name: PSScriptAnalyzer
         shell: pwsh

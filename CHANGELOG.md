@@ -4,7 +4,7 @@ Notable changes to Intune Housekeeper. Versions follow semantic versioning.
 
 ## Unreleased
 
-Pre-release development, validated against a production tenant of roughly 1000 Windows
+Pre-release development, validated against a production tenant of roughly 900 Windows
 objects. Changes worth recording because each came from something the tool got wrong:
 
 - Retained previous versions of applications are recognised by display name and version
@@ -21,6 +21,9 @@ objects. Changes worth recording because each came from something the tool got w
 - PowerShell 7 is required. Windows PowerShell 5.1 fails at sign-in on any machine with
   several Microsoft.Graph module versions installed.
 - An existing Graph session is reused, and only a session the script opened is closed.
+- Packaged as a module. `Install-Module IntuneHousekeeper`, then
+  `Export-IntuneHousekeeperReport`. Dependencies are declared in the manifest rather
+  than checked at runtime.
 
 ## 1.0.0
 

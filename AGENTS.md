@@ -6,9 +6,16 @@ most of them came from something breaking in a real tenant.
 
 ## What this is
 
-Intune Housekeeper: a single read-only PowerShell script that inventories Windows Intune
-objects via Microsoft Graph and writes an Excel worklist. There is no build step, no
-test suite, and no dependencies beyond two PowerShell modules.
+Intune Housekeeper: a read-only PowerShell module that inventories Windows Intune
+objects via Microsoft Graph and writes an Excel worklist. One exported command,
+`Export-IntuneHousekeeperReport`; everything else in the .psm1 is internal. There is no
+build step and no test suite, and no dependencies beyond the two modules named in the
+manifest.
+
+Module state lives at script scope in the .psm1 and therefore persists for the whole
+session. `Reset-RunState` is called at the top of the exported function for that reason.
+Any new counter or cache must be reset there too, or a second run in one session
+inherits the first run's data.
 
 ## Hard constraints
 
@@ -22,7 +29,7 @@ These are not preferences. Breaking any of them breaks the tool.
    straight quotes. Non-ASCII characters survive an editor and then break when the file
    passes through sync clients or deployment pipelines. Verify before committing:
    ```bash
-   python3 -c "print(sum(1 for b in open('Get-IntuneHousekeeper.ps1','rb').read() if b>127))"
+   python3 -c "print(sum(1 for b in open('IntuneHousekeeper/IntuneHousekeeper.psm1','rb').read() if b>127))"
    ```
    That must print `0`.
 
@@ -107,12 +114,15 @@ There is no test harness. Before committing:
 
 1. ASCII check (above) returns `0`.
 2. Bracket balance is even.
-3. The file parses:
+3. The file parses, the manifest is valid, and the module imports:
    ```powershell
    $errors = $null
    [System.Management.Automation.Language.Parser]::ParseFile(
-       (Resolve-Path ./Get-IntuneHousekeeper.ps1), [ref]$null, [ref]$errors)
+       (Resolve-Path ./IntuneHousekeeper/IntuneHousekeeper.psm1), [ref]$null, [ref]$errors)
    $errors
+   Test-ModuleManifest ./IntuneHousekeeper/IntuneHousekeeper.psd1
+   Import-Module ./IntuneHousekeeper/IntuneHousekeeper.psd1 -Force
+   Get-Command -Module IntuneHousekeeper
    ```
-   That must produce no output.
+   All of this runs in CI on every push.
 4. Ideally, run it against a real tenant. It is read-only, so this is safe.

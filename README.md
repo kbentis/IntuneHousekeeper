@@ -1,6 +1,6 @@
 # Intune Housekeeper
 
-A read-only PowerShell script that inventories your Windows Intune estate through
+A read-only PowerShell module that inventories your Windows Intune estate through
 Microsoft Graph and produces an Excel worklist of objects worth cleaning up:
 unassigned policies, leftover test objects, broken assignments, and empty groups.
 
@@ -12,10 +12,10 @@ You do not have to take that on trust. Every Graph call in the script carries an
 explicit method, and they are visible in one grep:
 
 ```powershell
-Select-String -Path .\Get-IntuneHousekeeper.ps1 -Pattern '-Method' -SimpleMatch
+Select-String -Path .\IntuneHousekeeper\IntuneHousekeeper.psm1 -Pattern '-Method' -SimpleMatch
 ```
 
-Every hit is `-Method GET`.
+Every hit is `-Method GET`, and CI fails the build on anything else.
 
 ---
 
@@ -61,15 +61,11 @@ without notice.
 ## Requirements
 
 - Windows. Broker sign-in and the workbook header styling both depend on it.
-- **PowerShell 7.** Windows PowerShell 5.1 is not supported, and the script declines to
-  run there. See below for why.
-- Modules: `Microsoft.Graph.Authentication`, `ImportExcel`. ImportExcel writes the
-  workbook itself, so Excel does not need to be installed.
-  ```powershell
-  Install-Module Microsoft.Graph.Authentication, ImportExcel -Scope CurrentUser
-  ```
-  See the note on the Excel dependency below before deploying this in a commercial
-  environment.
+- **PowerShell 7.** Windows PowerShell 5.1 is not supported; the manifest requires 7.0. See below for why.
+- Dependencies: `Microsoft.Graph.Authentication` and `ImportExcel`, both declared in the
+  manifest and installed automatically. ImportExcel writes the workbook itself, so Excel
+  does not need to be installed. See the note on the Excel dependency below before
+  deploying this in a commercial environment.
 - An Entra app registration, described below.
 
 ### Why PowerShell 7 and not 5.1
@@ -150,20 +146,38 @@ Housekeeper itself is MIT and makes no claim about its dependencies' terms.
 
 ---
 
+## Install
+
+```powershell
+Install-Module IntuneHousekeeper -Scope CurrentUser
+```
+
+Or clone the repository and import the module folder directly:
+
+```powershell
+Import-Module .\IntuneHousekeeper\IntuneHousekeeper.psd1
+```
+
 ## Usage
 
 ```powershell
-.\Get-IntuneHousekeeper.ps1 -ClientId "<app id>" -TenantId "<tenant id>"
+Export-IntuneHousekeeperReport -ClientId "<app id>" -TenantId "<tenant id>"
 ```
 
 With test-object detection and the optional Entra group check:
 
 ```powershell
-.\Get-IntuneHousekeeper.ps1 -ClientId "<app id>" -TenantId "<tenant id>" `
-    -TestNameRegex '-TEST$' `
+Export-IntuneHousekeeperReport -ClientId "<app id>" -TenantId "<tenant id>" `
+    -TestNameRegex '(^|[-_ (\[])TEST([-_ )\]]|$)' `
     -GroupOwnerUpns "alice@contoso.com","bob@contoso.com" `
     -GroupNamePrefix "<your-prefix>-"
 ```
+
+The module exports one command. `Get-Help Export-IntuneHousekeeperReport -Examples`
+prints seven worked examples.
+
+If you connect to Graph yourself first, the command reuses that session and leaves it
+open. Otherwise it signs in and disconnects when it finishes.
 
 ### Finding your way around the parameters
 
@@ -172,7 +186,7 @@ existing directories and quotes paths containing spaces. `-TestNameRegex` offers
 common naming conventions, already single-quoted, which matters because a pattern like
 `-TEST$` breaks if you put it in double quotes.
 
-`Get-Help .\Get-IntuneHousekeeper.ps1 -Examples` prints seven worked examples, and
+`Get-Help Export-IntuneHousekeeperReport -Examples` prints seven worked examples, and
 `-?` prints the full parameter list. If you run it with no parameters and PowerShell
 prompts for `ClientId`, type `!?` at that prompt to be told where in the Entra portal
 to find the value.
@@ -273,7 +287,7 @@ A test-named object assigned to All Devices or All Users is the only finding in 
 tool that describes something actually reaching devices, so it is worth setting
 correctly.
 
-**Anchor the pattern.** A bare `test` could also match `Latest`, `Attestation` and
+**Anchor the pattern.** A bare `test` also matches `Latest`, `Attestation` and
 `Protest`. Flagging a Device Health Attestation policy on All
 Devices as a leftover test object would put a `High` row in front of you that is
 completely wrong. The word-boundary form above matches `Wifi-TEST`, `Wifi_TEST`,
