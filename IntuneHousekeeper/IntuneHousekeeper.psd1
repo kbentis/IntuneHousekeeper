@@ -1,6 +1,6 @@
 @{
     RootModule           = 'IntuneHousekeeper.psm1'
-    ModuleVersion        = '0.9.0'
+    ModuleVersion        = '0.9.1'
     GUID                 = 'b1dd7092-e846-4047-a833-3a9412845814'
     Author               = 'Konstantinos Bentis'
     Copyright            = '(c) 2026 Konstantinos Bentis. MIT licensed.'
