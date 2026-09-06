@@ -862,8 +862,9 @@ function Export-IntuneHousekeeperReport {
         Required delegated permissions on the app registration, admin-consented:
           DeviceManagementApps.Read.All            applications and their assignments
           DeviceManagementConfiguration.Read.All   profiles, compliance, baselines
-          DeviceManagementScripts.Read.All         remediations, platform scripts, and the
-                                                   macOS scripts read for group references
+          DeviceManagementScripts.Read.All         remediations, platform scripts, and
+                                                   script assignments read for the group
+                                                   check
           Group.Read.All                           Entra group section only
           User.Read.All                            Entra group section only
 

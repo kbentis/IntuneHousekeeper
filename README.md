@@ -104,7 +104,7 @@ PowerShell app.
   |---|---|
   | `DeviceManagementApps.Read.All` | Applications and their assignments |
   | `DeviceManagementConfiguration.Read.All` | Profiles, compliance policies, baselines |
-  | `DeviceManagementScripts.Read.All` | Remediations, platform scripts, and the macOS scripts read for group references |
+  | `DeviceManagementScripts.Read.All` | Remediations, platform scripts, and script assignments read for the group check |
   | `Group.Read.All` | Entra group details and membership (optional section only) |
   | `User.Read.All` | Resolving owner accounts and their groups (optional section only) |
 
