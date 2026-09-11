@@ -1,8 +1,9 @@
 @{
     RootModule           = 'IntuneHousekeeper.psm1'
-    ModuleVersion        = '0.9.1'
+    ModuleVersion        = '1.0.0'
     GUID                 = 'b1dd7092-e846-4047-a833-3a9412845814'
     Author               = 'Konstantinos Bentis'
+    CompanyName          = 'kbentis.cloud'
     Copyright            = '(c) 2026 Konstantinos Bentis. MIT licensed.'
 
     Description          = 'Read-only inventory of unassigned, mis-assigned and leftover Windows Intune objects, and optionally owner-scoped Entra ID assignment groups. Produces an Excel decision tracker. Issues GET requests only and never modifies a tenant.'
@@ -32,7 +33,7 @@
             Tags         = @('Intune', 'MicrosoftGraph', 'Entra', 'Windows', 'Endpoint', 'Reporting', 'Excel', 'ReadOnly')
             LicenseUri   = 'https://github.com/kbentis/IntuneHousekeeper/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/kbentis/IntuneHousekeeper'
-            ReleaseNotes = 'Pre-release. See CHANGELOG.md in the project repository.'
+            ReleaseNotes = 'First public release. Read-only Windows Intune inventory producing an Excel worklist of unassigned, mis-assigned and leftover objects, with an optional Entra assignment group check. See CHANGELOG.md in the project repository.'
         }
     }
 }

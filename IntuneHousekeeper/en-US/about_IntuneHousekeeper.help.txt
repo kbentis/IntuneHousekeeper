@@ -1,0 +1,179 @@
+TOPIC
+    about_IntuneHousekeeper
+
+SHORT DESCRIPTION
+    A read-only inventory of a Windows Intune estate, written to an Excel decision
+    tracker. Issues GET requests only and never changes a tenant.
+
+LONG DESCRIPTION
+    The Intune portal has no list view of assignment status. Finding out what is
+    unassigned means opening every object by hand, so nobody does it, and years of test
+    policies and superseded applications quietly accumulate.
+
+    Intune Housekeeper reads the estate through Microsoft Graph and writes one workbook.
+    The Worklist sheet is the output that matters: every object worth acting on,
+    pre-sorted, each row carrying a plain-language reason and a suggested action, with
+    columns for recording what you decided.
+
+    Nothing is changed for you. Intune has no recycle bin, and a deleted policy or
+    application is gone permanently, so every change is made by a human in the portal
+    after review. The module only ever issues GET requests, and the project's CI fails
+    the build if any other method appears in the source.
+
+COMMANDS
+    Export-IntuneHousekeeperReport
+        Runs the inventory and writes the workbook. The command you will use.
+
+    Get-IntuneHousekeeperConfig
+        Shows the saved settings and the file they came from.
+
+    Set-IntuneHousekeeperConfig
+        Saves settings so they do not have to be typed each run.
+
+REQUIREMENTS
+    PowerShell 7 on Windows. Windows PowerShell 5.1 is not supported: .NET Framework
+    permits one Microsoft.Identity.Client assembly per process with no isolation, so a
+    workstation carrying several Microsoft.Graph module versions fails at sign-in.
+
+    The modules Microsoft.Graph.Authentication and ImportExcel, both declared in the
+    manifest and installed automatically. Excel itself is not needed.
+
+    Your own Entra app registration, public client / native flow. Under Authentication,
+    Add Redirect URI, Mobile and desktop applications, add both
+    ms-appx-web://Microsoft.AAD.BrokerPlugin/<client id> and http://localhost. The first
+    is required for broker sign-in, which any tenant enforcing Conditional Access token
+    protection needs.
+
+    Delegated permissions, admin-consented:
+
+        DeviceManagementApps.Read.All            applications
+        DeviceManagementConfiguration.Read.All   profiles, compliance, baselines
+        DeviceManagementScripts.Read.All         remediations and platform scripts
+        Group.Read.All                           group section only
+        User.Read.All                            group section only
+        DeviceManagementServiceConfig.Read.All   group section only
+
+    Consenting a permission does not put it in an existing token. After adding one, sign
+    in once with -Scopes to force a fresh authorization:
+
+        Connect-MgGraph -ClientId '<app id>' -TenantId '<tenant id>' -NoWelcome -Scopes `
+            'DeviceManagementApps.Read.All','DeviceManagementConfiguration.Read.All', `
+            'DeviceManagementScripts.Read.All'
+
+    The module itself never passes -Scopes, because with a custom client ID that triggers
+    a consent prompt. Here the prompt is exactly what is wanted, once.
+
+GETTING STARTED
+    Save your settings, then run:
+
+        Set-IntuneHousekeeperConfig -ClientId '<app id>' -TenantId '<tenant id>'
+        Export-IntuneHousekeeperReport
+
+    Settings live in %APPDATA%\IntuneHousekeeper\settings.json, or wherever -ConfigPath
+    points. Only the values you pass are stored, and an explicit parameter always wins
+    over a saved one for that run. Nothing secret is kept there: sign-in uses a public
+    client flow, which has no secret.
+
+THE WORKBOOK
+    Summary      totals per category, broken down by priority
+    RunInfo      the settings the run used, and whether collection was complete
+    Worklist     every actionable object, pre-sorted, with reasons and decision columns
+    the rest     read-only inventory per object type
+
+    Actionable means High plus Medium. Low is "keep or confirm" and Watch is parked, so
+    neither is counted, though Low rows still appear on the Worklist as context.
+
+PRIORITY
+    Priority means order of cleanup action, not risk to devices. Only High describes
+    something that can actually affect a device.
+
+    High     Reality differs from intent: a test-named object on All Devices or All
+             Users, or a group both included and excluded within one assignment intent.
+             Correct it, do not delete it.
+    Medium   Unassigned or exclusion-only, with nothing referencing it. The cleanup queue.
+    Low      Unassigned but referenced, or a test-named object scoped to a group.
+    Watch    An unassigned application created recently. Parked, not counted.
+    (blank)  Assigned and healthy.
+
+FLAGS
+    Unassigned              no assignments at all
+    OnlyExclusions          exclusion targets only, so deployed to nothing
+    TestNamed               display name matches -TestNameRegex
+    TestNamedBroadAssign    test-named and assigned to All Devices or All Users
+    DuplicateName           name occurs more than once in its type; never raises priority
+    IncludeExcludeOverlap   same group included and excluded within one assignment intent
+    SupersededByNewer       a newer version supersedes this application
+    SupersededByName        unassigned, but a newer version of the same application is
+                            assigned; matched by name and version
+    RetainedVersionExpired  SupersededByName, but older than -RetainedVersionMonths
+    HasDependents           another application depends on this one
+    RecentlyCreated         unassigned application created within -NewAppGraceMonths
+    ZeroMembers             group has no direct members
+    NoAssignmentFound       no assignment referencing the group was found
+
+TEST OBJECTS
+    There is no built-in naming convention. -TestNameRegex is empty by default, and
+    without it no object is flagged as a test object.
+
+    A shipped default such as '-TEST$' would report nothing on a tenant naming things
+    TEST-Wifi or Wifi (test), and an empty result reads as a clean estate rather than as
+    a check that never ran. Anchor the pattern on a word boundary, because a bare 'test'
+    also matches Latest and Attestation:
+
+        -TestNameRegex '(^|[-_ (\[])TEST([-_ )\]]|$)'
+
+    The run reports how many names matched, and warns when none did.
+
+RETAINED APPLICATION VERSIONS
+    Keeping the previous version of an application for rollback is common, and those
+    copies are unassigned by design. Where Intune supersedence exists they are recognised
+    from it. Where it does not, an unassigned application is recognised as a retained copy
+    when its name carries a version and another application with the same base name has
+    both a higher version and a live inclusion assignment.
+
+    Rollback copies expire. Past -RetainedVersionMonths a retained copy returns to the
+    cleanup queue flagged RetainedVersionExpired, because nobody rolls back to a build
+    from two years ago. Set the window to suit your environment, or 0 to queue every
+    retained copy.
+
+THE GROUP SECTION
+    Supplying -GroupOwnerUpns and -GroupNamePrefix adds a check over Entra assignment
+    groups owned by those accounts whose names match the prefix, reporting those that are
+    empty or that no assignment references.
+
+    Both filters are required. Owner scoping alone pulls in every Teams and Microsoft 365
+    group an owner happens to hold, where "not used in Intune" means nothing.
+
+    Group references are established tenant wide. Reporting is Windows only, but a group
+    used solely by a macOS shell script is still a group in use, so assignments are read
+    from twelve object types outside the report purely to establish references. If any
+    read fails, the section is skipped rather than reported from partial data.
+
+    Group rows are always Investigate, never Remove.
+
+LIMITATIONS
+    Assignments pointing at empty or deleted groups are not detected. They look healthy
+    while deploying to nothing.
+
+    Assignment filters are not evaluated. An object assigned through a filter matching no
+    device is reported as healthy.
+
+    The time an object was unassigned is not recoverable: assignment changes do not update
+    lastModifiedDateTime. The audit log would be required.
+
+    Detection of test objects and of assignment groups depends on naming conventions you
+    supply. Anything that deviates is invisible.
+
+    A group with no owner is invisible to the group section, and an abandoned group is
+    more likely than most to have lost its owner.
+
+    macOS, iOS and Android objects are not reported on.
+
+    All Intune calls use the Graph beta endpoint, which Microsoft can change without
+    notice.
+
+SEE ALSO
+    Get-Help Export-IntuneHousekeeperReport -Full
+    Get-Help Set-IntuneHousekeeperConfig -Examples
+    https://github.com/kbentis/IntuneHousekeeper
+    https://kbentis.cloud

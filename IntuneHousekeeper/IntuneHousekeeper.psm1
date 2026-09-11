@@ -13,6 +13,16 @@ $ErrorActionPreference = 'Stop'
 $script:AllReferencedGroupIds = [System.Collections.Generic.HashSet[string]]::new()
 $script:UnrecognisedTypes     = @{}
 $script:GraphReadIncomplete   = $false
+
+# Priority cell shading. Warm for rows that need action, neutral for parked ones, and
+# nothing at all for healthy objects, so the eye is drawn only to what matters. A blank
+# Priority is not in this map and is therefore left unshaded.
+$script:PriorityFill = @{
+    'High'   = '#F4C7C3'
+    'Medium' = '#FCE0B6'
+    'Low'    = '#FDF3CD'
+    'Watch'  = '#EDEDED'
+}
 $script:ReferenceReadIncomplete = $false
 $script:ConnectionOwned       = $false
 $script:ObjectsExamined       = 0
@@ -762,7 +772,7 @@ function Export-IntuneHousekeeperReport {
 
         Group flags:
           ZeroMembers             group has 0 direct members
-          NotUsedInIntune         group ID is not referenced by any assignment found. All
+          NoAssignmentFound       group ID is not referenced by any assignment found. All
                                   platforms count, and assignments are also read from object
                                   types outside the report (macOS shell and custom attribute
                                   scripts, Autopilot, enrolment configurations, update rings,
@@ -930,6 +940,9 @@ function Export-IntuneHousekeeperReport {
 
         A read-only app registration is recommended. The tool only issues GET, but a
         registration consented for ReadWrite holds a token that could change your tenant.
+
+        Project: https://github.com/kbentis/IntuneHousekeeper
+        Notes on endpoint management: https://kbentis.cloud
 
         ASCII-only file. No non-ASCII characters anywhere (no em-dashes, no smart quotes).
         Read-only: no PATCH, POST or DELETE calls are made against Graph.
@@ -1361,7 +1374,7 @@ function Export-IntuneHousekeeperReport {
 
             $flags = @()
             if ($memberState -eq 'empty') { $flags += 'ZeroMembers' }
-            if (-not $usedInIntune)       { $flags += 'NotUsedInIntune' }
+            if (-not $usedInIntune)       { $flags += 'NoAssignmentFound' }
             if ($flags.Count -eq 0)       { continue }
 
             $usedText = if ($usedInIntune) { 'Yes' } else { 'No' }
@@ -1484,7 +1497,7 @@ function Export-IntuneHousekeeperReport {
             elseif ($r.ObjectType -eq 'Entra Group') {
                 $parts = @()
                 if ($f -match 'ZeroMembers')     { $parts += 'no members' }
-                if ($f -match 'NotUsedInIntune') { $parts += 'no Intune assignment referencing it' }
+                if ($f -match 'NoAssignmentFound') { $parts += 'no assignment found referencing it' }
                 $reason = 'Owned assignment group with ' + ($parts -join ' and ') + '. Verify in the portal first: the group could still be used by an object type this tool does not read'
                 $action = 'Investigate'
             }
@@ -1587,6 +1600,27 @@ function Export-IntuneHousekeeperReport {
                     # RunInfo values are labels, some of which happen to look like numbers.
                     if ($ws.Name -eq 'RunInfo' -and $lastRow -gt 1) {
                         $ws.Cells[2, 2, $lastRow, 2].Style.Numberformat.Format = '@'
+                    }
+
+                    # Shade the Priority cell so a long sheet can be scanned at a glance.
+                    # A plain fill rather than Excel conditional formatting: these sheets
+                    # are a snapshot, and a static fill survives sorting, filtering, and
+                    # being pasted into a mail or a ticket, which is what operators
+                    # actually do with these rows.
+                    $priorityColumn = 0
+                    for ($c = 1; $c -le $lastCol; $c++) {
+                        if ([string]$ws.Cells[1, $c].Text -eq 'Priority') { $priorityColumn = $c; break }
+                    }
+                    if ($priorityColumn -gt 0 -and $lastRow -gt 1) {
+                        for ($r = 2; $r -le $lastRow; $r++) {
+                            $priorityValue = [string]$ws.Cells[$r, $priorityColumn].Text
+                            if ($script:PriorityFill.ContainsKey($priorityValue)) {
+                                $priorityCell = $ws.Cells[$r, $priorityColumn]
+                                $priorityCell.Style.Fill.PatternType = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
+                                $priorityCell.Style.Fill.BackgroundColor.SetColor(
+                                    [System.Drawing.ColorTranslator]::FromHtml($script:PriorityFill[$priorityValue]))
+                            }
+                        }
                     }
                 }
             }

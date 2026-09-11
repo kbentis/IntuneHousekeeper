@@ -27,6 +27,10 @@ superseded applications quietly accumulate.
 
 This gives you one sorted worklist instead.
 
+<img src="docs/images/worklist.png" alt="The Worklist sheet: objects sorted High, Medium then Low, each row carrying an object type, its assignment state, a plain-language reason such as 'retained previous version of an application that is still assigned, but created outside the rollback window', a suggested action, and empty columns for recording a decision" width="900">
+
+Object names are blurred. Everything else is a real report.
+
 ---
 
 ## What it covers
@@ -214,7 +218,8 @@ secret, so the file holds identifiers and preferences only. It still identifies 
 tenant, so keep it out of repositories and screenshots.
 
 The module exports three commands. `Get-Help Export-IntuneHousekeeperReport -Examples`
-prints eight worked examples.
+prints eight worked examples, and `Get-Help about_IntuneHousekeeper` covers setup,
+priorities, flags and limitations in one place.
 
 If you connect to Graph yourself first, the command reuses that session and leaves it
 open. Otherwise it signs in and disconnects when it finishes.
@@ -256,9 +261,13 @@ One workbook, `Intune-Housekeeper_<timestamp>.xlsx`. Two sheets matter:
 - **Worklist** - every actionable object, pre-sorted, with a plain-language reason and
   a suggested action. Record your decisions here.
 
+![The Summary sheet: one row per category with totals broken down into High, Medium, Low, Watch, Healthy and Actionable columns](docs/images/summary.png)
+
 **RunInfo** records the settings the run used, so a workbook can be read months later
 without guessing which checks were switched on. It holds no tenant or account
 identifiers and is safe to share.
+
+![The RunInfo sheet: generated timestamp, Graph endpoint, platform scope, the test-name pattern, grace and retention windows, group prefix, settings file path, PowerShell and Graph module versions, and whether collection was complete](docs/images/runinfo.png)
 
 The remaining sheets are read-only inventory per object type.
 
@@ -286,6 +295,11 @@ were flagged, not every group examined. Every other row counts the whole categor
 
 Only High can actually affect a device.
 
+The Priority cell is shaded on every sheet: red for High, orange for Medium, yellow for
+Low, grey for Watch, and nothing for healthy objects. It is a plain fill rather than Excel
+conditional formatting, so it survives sorting, filtering, and being pasted into a mail or
+a ticket.
+
 Flagged Entra groups are always reported as Medium. The scale above describes Intune
 objects; a group is either worth a look or it is not.
 
@@ -305,7 +319,7 @@ objects; a group is either worth a look or it is not.
 | `HasDependents` | (apps) Another app depends on this one |
 | `RecentlyCreated` | (apps) Unassigned, created within `-NewAppGraceMonths` |
 | `ZeroMembers` | (groups) No direct members |
-| `NotUsedInIntune` | (groups) Not referenced by any Windows Intune assignment |
+| `NoAssignmentFound` | (groups) No assignment referencing this group was found |
 
 ---
 
@@ -389,8 +403,9 @@ of age.
 
 ## Known limitations
 
-- `NotUsedInIntune` means "not referenced by any assignment found". Every platform
-  counts, and twelve object types outside the report are read for their assignments as
+- `NoAssignmentFound` means exactly that: no assignment referencing the group turned up.
+  It is not a claim that the group is unused, which is why the flag is not called that.
+  Every platform counts, and twelve object types outside the report are read for their assignments as
   well. Any type Microsoft adds later is invisible until it is added to that list, which
   is why group rows are `Investigate` and never `Remove`.
 - Assignments pointing at **empty or deleted groups** are not detected. Those look
@@ -472,3 +487,8 @@ Two conventions worth keeping:
 ## Licence
 
 MIT. See [`LICENSE`](LICENSE).
+
+---
+
+Written by [Konstantinos Bentis](https://kbentis.cloud), who writes about Microsoft
+endpoint management at [kbentis.cloud](https://kbentis.cloud).

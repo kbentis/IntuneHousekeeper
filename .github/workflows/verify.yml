@@ -116,6 +116,9 @@ jobs:
           if (-not (Get-Help Export-IntuneHousekeeperReport).Synopsis) {
             Write-Host '::error::Comment-based help did not bind to the exported function.'; exit 1
           }
+          if (-not (Get-Help about_IntuneHousekeeper -ErrorAction SilentlyContinue)) {
+            Write-Host '::error::about_IntuneHousekeeper help topic did not resolve. Check en-US/about_IntuneHousekeeper.help.txt.'; exit 1
+          }
 
       - name: PSScriptAnalyzer
         shell: pwsh

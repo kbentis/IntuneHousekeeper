@@ -2,41 +2,25 @@
 
 Notable changes to Intune Housekeeper. Versions follow semantic versioning.
 
-## Unreleased
-
-Pre-release development, validated against a production tenant of roughly 900 Windows
-objects. Changes worth recording because each came from something the tool got wrong:
-
-- Retained previous versions of applications are recognised by display name and version
-  where no Intune supersedence relationship exists, and expire after
-  `-RetainedVersionMonths` so an ancient rollback copy returns to the cleanup queue.
-- Group references are collected tenant wide, including from twelve object types the
-  report does not cover, so a group used only by a macOS shell script is no longer
-  reported as referenced by nothing.
-- The Entra group section is skipped entirely if any Graph read failed, because a
-  partial reference set makes "nothing references this" unsafe to assert.
-- Actionable means High plus Medium. Low and Watch are excluded from the counts.
-- Test-object detection has no default naming convention and reports how many names it
-  matched, so a wrong pattern is visible rather than reading as a clean estate.
-- PowerShell 7 is required. Windows PowerShell 5.1 fails at sign-in on any machine with
-  several Microsoft.Graph module versions installed.
-- An existing Graph session is reused, and only a session the script opened is closed.
-- A missing token scope now prints the exact `Connect-MgGraph -Scopes` command that fixes
-  it. Consenting a permission does not put it in a cached token, and `Disconnect-MgGraph`
-  does not reliably clear that cache.
-- Graph failures include the error body rather than only the status code, so a 403 says
-  which permission it wanted.
-- `DeviceManagementScripts.Read.All` documented and checked. Without it, remediations and
-  platform scripts return 403 and come back empty while the rest of the report looks fine.
-- A run where any Graph read failed now warns clearly that the report is incomplete,
-  rather than only recording it on the RunInfo sheet.
-- Settings file support. `Set-IntuneHousekeeperConfig` saves identifiers and
-  preferences, `Get-IntuneHousekeeperConfig` shows them, and the report command reads
-  them. Explicit parameters still win.
-- Packaged as a module. `Install-Module IntuneHousekeeper`, then
-  `Export-IntuneHousekeeperReport`. Dependencies are declared in the manifest rather
-  than checked at runtime.
-
 ## 1.0.0
 
-First public release. Entry to be written at publish time.
+First public release.
+
+Intune Housekeeper inventories a Windows Intune estate through Microsoft Graph and writes
+an Excel decision tracker: a pre-sorted worklist of objects worth cleaning up, each with a
+plain-language reason and a suggested action. It issues GET requests only and never
+changes a tenant.
+
+- Covers applications, configuration profiles (templates, Settings Catalog, ADMX),
+  compliance policies, security baselines, remediations, and platform scripts.
+- Flags unassigned and exclusion-only objects, test-named objects assigned broadly, and
+  groups both included and excluded within one assignment intent.
+- Recognises retained previous versions of applications, through Intune supersedence where
+  it exists and by display name and version where it does not, and expires them after a
+  window you choose.
+- Optional Entra assignment group check for owned groups that are empty or that no
+  assignment references. Group references are established tenant wide, including from
+  object types the report does not cover.
+- Settings can be saved once with `Set-IntuneHousekeeperConfig` instead of being retyped.
+- Priority is colour-shaded in the workbook so a long sheet can be scanned at a glance.
+- Requires PowerShell 7 on Windows.

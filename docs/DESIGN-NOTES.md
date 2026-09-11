@@ -294,7 +294,7 @@ parses under both hosts, so the option to reverse this stays open.
 
 A group referenced only by a macOS profile is still a group in use. The first version
 collected referenced group IDs from objects that had already passed the Windows filter,
-so those groups came back `NotUsedInIntune` with a suggested action of Remove. For a
+so those groups came back flagged with a suggested action of Remove. For a
 tenant with a separate macOS or mobile estate, that is the tool telling you to delete
 groups that are actively deploying software.
 
@@ -400,6 +400,19 @@ The scope check is conditional. `Group.Read.All` and `User.Read.All` are only re
 when `-GroupOwnerUpns` is supplied, so an Intune-only run does not warn about them.
 Warning about permissions a run does not need is the same failure mode as warning
 spam: it trains the operator to ignore warnings.
+
+The flag is called `NoAssignmentFound`, not `NotUsedInIntune`. Everything else this tool
+reports is a fact read straight off an object: this policy has no assignments, this app
+has a newer version, this name matches your pattern. A claim that a group is unused is
+different in kind. It is a negative about the whole tenant, and establishing it means
+reading every object type that could reference a group, which today is twelve endpoints
+beyond the ones reported on, arrived at only because a live tenant caught the list
+missing macOS shell scripts. Any object type Microsoft adds is a silent false positive
+until someone adds it here.
+
+So the flag states what the tool did rather than what the operator might conclude from
+it. The suggested action is `Investigate`, never `Remove`, and the reason text says to
+check the portal first.
 
 ---
 
