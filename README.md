@@ -197,7 +197,7 @@ window, while the key being missing means use the default.
 `ClientId` and `TenantId` are the only required values, from either source. Without them
 the command stops with a message telling you how to save them, rather than prompting.
 
-The settings file holds no credential, but it does hold your tenant ID, client ID and naming conventions, which identify your organisation. 
+The settings file holds no credential, but it does hold your tenant ID, client ID and naming conventions, which identify your organisation.
 The settings.json file is in .gitignore for that reason.
 
 The module exports three commands. `Get-Help Export-IntuneHousekeeperReport -Examples`
@@ -214,10 +214,10 @@ existing directories and quotes paths containing spaces. `-TestNameRegex` offers
 common naming conventions, already single-quoted, which matters because a pattern like
 `-TEST$` breaks if you put it in double quotes.
 
-`Get-Help Export-IntuneHousekeeperReport -Examples` prints seven worked examples, and
-`-?` prints the full parameter list. If you run it with no parameters and PowerShell
-prompts for `ClientId`, type `!?` at that prompt to be told where in the Entra portal
-to find the value.
+`Get-Help Export-IntuneHousekeeperReport -Examples` prints eight worked examples, and
+`-?` prints the full parameter list. Running the command with nothing saved and no
+parameters stops with a message naming `Set-IntuneHousekeeperConfig` and telling you
+where in the Entra portal to find the two values it needs.
 
 ### Parameters
 
@@ -428,11 +428,15 @@ Force one fresh authorization by asking for the scopes explicitly:
 Disconnect-MgGraph -ErrorAction SilentlyContinue
 
 Connect-MgGraph -ClientId "<app id>" -TenantId "<tenant id>" -NoWelcome -Scopes `
-    'DeviceManagementApps.Read.All','DeviceManagementConfiguration.Read.All',
-    'DeviceManagementScripts.Read.All','Group.Read.All','User.Read.All'
+    'DeviceManagementApps.Read.All','DeviceManagementConfiguration.Read.All', `
+    'DeviceManagementScripts.Read.All','Group.Read.All','User.Read.All', `
+    'DeviceManagementServiceConfig.Read.All'
 
 (Get-MgContext).Scopes
 ```
+
+Drop the last three if you do not use the group section. The run itself tells you which
+scopes it wants and prints the exact command to fix a missing one.
 
 Then run the report in the same session; it reuses that connection. The module itself
 never passes `-Scopes`, because with a custom client ID MSAL treats it as a new
@@ -446,9 +450,9 @@ If the scope is still missing afterwards, close every PowerShell window and dele
 ## Contributing
 
 Forks and flavours are the point. See [`docs/DESIGN-NOTES.md`](docs/DESIGN-NOTES.md) for
-why things work the way they do, including several PowerShell 5.1 landmines worth not
-rediscovering, and [`AGENTS.md`](AGENTS.md) if you are working with an AI assistant on
-this repo.
+why things work the way they do: most of the non-obvious choices came from something
+breaking in a real tenant, and re-arguing them wastes time. Read
+[`AGENTS.md`](AGENTS.md) too if you are working with an AI assistant on this repo.
 
 Two conventions worth keeping:
 
