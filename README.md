@@ -41,12 +41,7 @@ Optionally, Entra ID assignment groups that are empty or referenced by nothing.
 
 Not reported on: Autopilot deployment profiles, enrolment configurations, assignment
 filters, feature, quality and driver update profiles, app configuration and app
-protection policies, and macOS shell and custom attribute scripts.
-
-Their **assignments are still read** when the Entra group section runs, purely to
-establish which groups are referenced. Reporting is Windows only; referencing has to be
-tenant wide, or a group used solely by a macOS shell script looks like it is used by
-nothing.
+protection policies.
 
 Object types are classified as Windows, another platform, or unrecognised. Applications
 are matched against an explicit list of Windows types, profiles and compliance policies
@@ -54,7 +49,7 @@ against a Windows pattern. Anything unrecognised is left out of the report and n
 a warning at the end of the run, so a type the tool has not seen before is visible
 rather than silently included or silently dropped.
 
-macOS, iOS, and Android are not covered. Pull requests welcome.
+macOS, iOS, and Android are not covered yet. Will be in a future version.
 
 All Intune calls use the Graph **beta** endpoint, because several of these object types
 and their assignment expansions are only available there. Microsoft can change beta
@@ -77,18 +72,7 @@ without notice.
 Windows PowerShell 5.1 runs on .NET Framework, which permits one version of a given
 assembly per process and provides no isolation between modules. An admin workstation
 that has accumulated several `Microsoft.Graph.*` module versions ends up with one
-`Microsoft.Identity.Client` serving all of them, and sign-in fails before the tool runs:
-
-```
-Connect-MgGraph : InteractiveBrowserCredential authentication failed:
-Could not load type 'Microsoft.Identity.Client.AuthScheme.TokenType'
-from assembly 'Microsoft.Identity.Client, Version=4.67.2.0'
-```
-
-Fixing that means uninstalling Graph modules the admin uses for other work, which is not
-a reasonable prerequisite for a read-only report. PowerShell 7 loads the SDK's
-dependencies in an isolated context and does not have the problem. This was reproduced
-on a normal enterprise workstation: identical command, 5.1 failed, 7 worked.
+`Microsoft.Identity.Client` serving all of them, and sign-in fails before the tool runs.
 
 ### App registration
 
@@ -213,9 +197,8 @@ window, while the key being missing means use the default.
 `ClientId` and `TenantId` are the only required values, from either source. Without them
 the command stops with a message telling you how to save them, rather than prompting.
 
-Nothing secret is stored. The tool signs in through a public client flow, which has no
-secret, so the file holds identifiers and preferences only. It still identifies your
-tenant, so keep it out of repositories and screenshots.
+The settings file holds no credential, but it does hold your tenant ID, client ID and naming conventions, which identify your organisation. 
+The settings.json file is in .gitignore for that reason.
 
 The module exports three commands. `Get-Help Export-IntuneHousekeeperReport -Examples`
 prints eight worked examples, and `Get-Help about_IntuneHousekeeper` covers setup,
@@ -328,9 +311,7 @@ objects; a group is either worth a look or it is not.
 There is no built-in test-naming convention. `-TestNameRegex` is empty by default, and
 without it the `TestNamed` and `TestNamedBroadAssign` flags never fire.
 
-This is deliberate. A shipped default such as `-TEST$` reports nothing on a tenant that
-names things `TEST-Wifi` or `Wifi (test)`, and a report showing no test objects reads as
-a clean result rather than as a check that never ran. Supply your own pattern:
+This is deliberate. Supply your own pattern:
 
 ```powershell
 -TestNameRegex '-TEST$'                          # hyphen suffix only
@@ -341,13 +322,6 @@ a clean result rather than as a check that never ran. Supply your own pattern:
 A test-named object assigned to All Devices or All Users is the only finding in this
 tool that describes something actually reaching devices, so it is worth setting
 correctly.
-
-**Anchor the pattern.** A bare `test` also matches `Latest`, `Attestation` and
-`Protest`. In one real tenant, 75 object names contained the substring and 53 of those
-were Latest or Attestation objects. Flagging a Device Health Attestation policy on All
-Devices as a leftover test object would put a `High` row in front of you that is
-completely wrong. The word-boundary form above matches `Wifi-TEST`, `Wifi_TEST`,
-`Wifi TEST` and `Wifi (test)` while leaving all of those alone.
 
 **Check the match count.** The run reports how many object names matched, and warns when
 none did, because a report with no test findings otherwise reads as a clean estate
