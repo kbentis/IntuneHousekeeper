@@ -2,6 +2,18 @@
 
 Notable changes to Intune Housekeeper. Versions follow semantic versioning.
 
+## 1.2.0
+
+**Behaviour change:** the Entra group section now requires `-GroupNamePrefix` as well as
+`-GroupOwnerUpns`.
+
+- A run with owners but no prefix used to check every group those accounts own,
+  including Teams, Microsoft 365, Conditional Access and licensing groups. It now skips
+  the section before sign-in, with one warning saying how to set the prefix, and asks
+  for no group permissions. Owners saved in the settings file behave the same way.
+- RunInfo records why the group section was skipped. It no longer reports the section as
+  not requested when it was skipped because a read failed.
+
 ## 1.1.0
 
 The tool can now be tried without registering an app.

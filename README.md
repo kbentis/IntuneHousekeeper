@@ -21,9 +21,12 @@ Every hit is `-Method GET`, and CI fails the build on anything else.
 
 ## Why
 
-The Intune portal has no list view of assignment status. Finding out what is unassigned
-means opening every object by hand, so nobody does it, and years of test policies and
-superseded applications quietly accumulate.
+The Intune portal shows whether an app or policy is assigned. It does not show whether
+the assignment makes sense: an assignment made only of exclusions reaches nobody, a test
+object left on All Devices looks like any other assigned policy, and an unassigned app
+may be a rollback copy rather than clutter. Checking means going through one blade per
+object type, so nobody does it, and years of test policies and superseded applications
+quietly accumulate.
 
 This gives you one sorted worklist instead.
 
@@ -98,9 +101,10 @@ Microsoft Graph Command Line Tools app.
   | `User.Read.All` | Resolving owner accounts and their groups (optional section only) |
   | `DeviceManagementServiceConfig.Read.All` | Autopilot and enrolment configurations, read for their group references (optional section only) |
 
-The last three are only needed if you use `-GroupOwnerUpns`. On a run without it, the
-module neither expects nor warns about them. If any of them is missing when the section
-does run, the reference set is incomplete and the section is skipped rather than reported
+The last three are only needed for the Entra group section, which runs only when you
+supply both `-GroupOwnerUpns` and `-GroupNamePrefix`. On any other run, the module
+neither expects nor warns about them. If any of them is missing when the section does
+run, the reference set is incomplete and the section is skipped rather than reported
 from partial data.
 
 **Use read-only scopes.** A `ReadWrite` grant satisfies the matching `Read` requirement
@@ -273,8 +277,8 @@ in the Entra admin center to find the values.
 | `-NewAppGraceMonths` | `6` | Unassigned apps created within this many months are parked as `Watch`. `0` flags every unassigned app. Range 0-120 |
 | `-RetainedVersionMonths` | `12` | How long a name-matched previous version stays out of the cleanup queue. `0` queues every retained copy. Range 0-120 |
 | `-TestNameRegex` | none | Regex matching your own test-object naming convention. Empty skips test-object detection |
-| `-GroupNamePrefix` | none | Restricts the group check to your assignment group naming convention |
-| `-GroupOwnerUpns` | none | Owner accounts whose groups are checked. Empty skips the section |
+| `-GroupNamePrefix` | none | Your assignment group naming convention. Required for the group check: with `-GroupOwnerUpns` and no prefix, the check is skipped with a warning |
+| `-GroupOwnerUpns` | none | Owner accounts whose groups are checked. Empty skips the section, and it also needs `-GroupNamePrefix` |
 | `-HeaderColor` | `#404040` | Worksheet header fill. Any HTML colour string |
 
 ---

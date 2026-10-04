@@ -401,9 +401,10 @@ under "Signing in without an app registration", and it is the opposite case: tha
 has nothing consented for this tool until it is asked.
 
 The scope check is conditional. `Group.Read.All` and `User.Read.All` are only required
-when `-GroupOwnerUpns` is supplied, so an Intune-only run does not warn about them.
-Warning about permissions a run does not need is the same failure mode as warning
-spam: it trains the operator to ignore warnings.
+when the group section will run, which takes both `-GroupOwnerUpns` and
+`-GroupNamePrefix`, so any other run does not warn about them. Warning about permissions
+a run does not need is the same failure mode as warning spam: it trains the operator to
+ignore warnings.
 
 **A scope in the token is not access.** Delegated sign-in acts as the signed-in account
 on either path, so what a call can read is the token's scope and the account's role
@@ -516,7 +517,7 @@ configured on it for this tool, so a sign-in without `-Scopes` carries whatever 
 tooling happened to consent, which may or may not include what this run needs.
 
 The request contains only the scopes the run needs: the three Intune scopes, plus the
-three for the group section when `-GroupOwnerUpns` is set. Asking for a scope that is
+three for the group section when it will run. Asking for a scope that is
 not consented is harmless for an admin who can consent, because they see a prompt, and
 fatal for one who cannot, because sign-in fails, even when the run would never use that
 scope. Consent to this app accumulates ad hoc, so a tenant holding five of the six is an
@@ -582,16 +583,40 @@ Fixtures for sign-in errors should be copied from a real run.
 
 ## Scoping the Entra group check
 
-The group section only reports groups that are **owned by a listed account** and
-**match a naming prefix**. Both filters matter.
+The group section only reports groups that are **owned by a listed account** and **match
+a naming prefix**. Both are required, and the section does not run without both.
 
 Owner scoping alone is not enough: people own Teams groups, Microsoft 365 groups, and
 distribution lists, and "not used in Intune" is a meaningless statement about a Teams
-group. Without the name filter the report fills with noise.
+group.
 
-Both are parameters with no defaults (`-GroupOwnerUpns`, `-GroupNamePrefix`). If you
-leave them empty the section is skipped entirely, which is the correct fail-closed
-behaviour: better to report nothing than to report nonsense.
+Noise was the original argument for the prefix, and it understates the problem. Owners
+also hold Conditional Access, licensing and app-access groups, and no Intune assignment
+references any of them. A Conditional Access exclusion group reported as
+`NoAssignmentFound` reads as "nothing uses this" about a group whose removal changes who
+can sign in. The prefix is the only signal that a group is an Intune assignment group,
+so it is required.
+
+Versions before 1.2.0 treated it as optional. The help said both were required, but the
+code applied the prefix only when one was set, so a run with owners and no prefix
+checked every group those accounts owned. That combination now skips the section. It is
+decided right after the settings merge, before sign-in, so the run behaves exactly like
+one without owners: no group permissions requested or checked, no reference-only
+endpoints read. One `Write-Warning` names the missing parameter, because the operator
+asked for the section and a missing prefix is something to fix. RunInfo records that
+reason. The skip is never applied by emptying `$GroupOwnerUpns`, which is what once made
+the section report as not requested to an operator who had requested it.
+
+There is deliberately no fallback. A default prefix is a naming convention shipped as a
+default, with the silent false negatives described under test-object detection.
+Filtering to security groups only was considered and rejected: it removes the Teams and
+Microsoft 365 noise, but Conditional Access and licensing groups are security groups, so
+it would keep exactly the rows that are dangerous and drop the ones that are merely
+noisy.
+
+Members are counted directly, so a group whose only member is an empty nested group is
+not reported as empty. That under-reports, which is the safe direction for a check whose
+output is a list of groups to look at removing.
 
 The corollary is a real limitation: an assignment group that deviates from your naming
 convention will never be reported.

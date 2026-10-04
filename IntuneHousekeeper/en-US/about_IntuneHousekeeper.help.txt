@@ -6,9 +6,12 @@ SHORT DESCRIPTION
     tracker. Issues GET requests only and never changes a tenant.
 
 LONG DESCRIPTION
-    The Intune portal has no list view of assignment status. Finding out what is
-    unassigned means opening every object by hand, so nobody does it, and years of test
-    policies and superseded applications quietly accumulate.
+    The Intune portal shows whether an app or policy is assigned. It does not show
+    whether the assignment makes sense: an assignment made only of exclusions reaches
+    nobody, a test object left on All Devices looks like any other assigned policy, and
+    an unassigned app may be a rollback copy rather than clutter. Checking means going
+    through one blade per object type, so nobody does it, and years of test policies and
+    superseded applications quietly accumulate.
 
     Intune Housekeeper reads the estate through Microsoft Graph and writes one workbook.
     The Worklist sheet is the output that matters: every object worth acting on,
@@ -160,8 +163,12 @@ THE GROUP SECTION
     groups owned by those accounts whose names match the prefix, reporting those that are
     empty or that no assignment references.
 
-    Both filters are required. Owner scoping alone pulls in every Teams and Microsoft 365
-    group an owner happens to hold, where "not used in Intune" means nothing.
+    Both are required. Owner scoping alone pulls in every Teams, Microsoft 365,
+    Conditional Access and licensing group an owner holds, where "no assignment found"
+    means nothing, and the prefix is the only signal that a group is an Intune
+    assignment group. With owners and no prefix, whether passed as parameters or saved
+    in the settings file, the section is skipped before sign-in with one warning, and no
+    group permissions are needed.
 
     Group references are established tenant wide. Reporting is Windows only, but a group
     used solely by a macOS shell script is still a group in use, so assignments are read
