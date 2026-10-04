@@ -29,6 +29,25 @@ $script:ObjectsExamined       = 0
 $script:TestNameMatches       = 0
 $script:GraphAuthVersion      = $null
 $script:ConfigPathUsed        = $null
+$script:AuthMode              = $null
+
+# Microsoft's own public client for Graph PowerShell, listed under Enterprise applications
+# as Microsoft Graph Command Line Tools. It is the same in every tenant, so it is not a
+# site-specific value. -UseGraphPowerShellApp signs in through it so the tool can be tried
+# without registering an app. See DESIGN-NOTES, 'Signing in without an app registration'.
+$script:GraphCommandLineToolsClientId = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
+
+# Every scope the tool can use. The consent handoff lists all of them, because it is run
+# once by somebody doing the operator a favour. The sign-in itself asks only for what the
+# run needs.
+$script:AllScopes = @(
+    'DeviceManagementApps.Read.All'
+    'DeviceManagementConfiguration.Read.All'
+    'DeviceManagementScripts.Read.All'
+    'Group.Read.All'
+    'User.Read.All'
+    'DeviceManagementServiceConfig.Read.All'
+)
 
 function Reset-RunState {
     $script:AllReferencedGroupIds = [System.Collections.Generic.HashSet[string]]::new()
@@ -40,6 +59,7 @@ function Reset-RunState {
     $script:TestNameMatches       = 0
     $script:GraphAuthVersion      = $null
     $script:ConfigPathUsed        = $null
+    $script:AuthMode              = $null
 }
 
 
@@ -66,6 +86,36 @@ $script:ConfigSettingNames = @(
 function Get-DefaultConfigPath {
     $base = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $HOME '.config' }
     return (Join-Path (Join-Path $base 'IntuneHousekeeper') 'settings.json')
+}
+
+function Get-AuthMode {
+    # 'GraphCommandLineTools' when the client ID is Microsoft's own, otherwise
+    # 'AppRegistration'. Derived every time and never stored, so there is one key to
+    # resolve rather than two that could contradict each other.
+    param([string]$ClientId)
+    if ($ClientId -and ($ClientId -eq $script:GraphCommandLineToolsClientId)) { return 'GraphCommandLineTools' }
+    return 'AppRegistration'
+}
+
+function Write-ConsentHandoff {
+    # Printed when the built-in sign-in path is blocked on consent. Lists every scope, not
+    # only this run's: it is run once by somebody doing the operator a favour, and asking
+    # them a second time when the group section is switched on is where a trial ends. No
+    # -ClientId, so it targets Microsoft Graph Command Line Tools, the SDK default, and the
+    # approver needs nothing beyond the Graph module.
+    param([string]$TenantId)
+    $cmd = "Connect-MgGraph -TenantId '{0}' -Scopes {1}" -f $TenantId, (($script:AllScopes | ForEach-Object { "'$_'" }) -join ',')
+    Write-Host ''
+    Write-Host 'Consent for Microsoft Graph Command Line Tools can be granted once by a Global'
+    Write-Host 'Administrator, Privileged Role Administrator, Cloud Application Administrator or'
+    Write-Host 'Application Administrator. An Intune Administrator cannot grant it. Send one of them'
+    Write-Host "this command. They run it, sign in, and tick 'Consent on behalf of your organization'."
+    Write-Host 'Every permission it asks for is read-only.'
+    Write-Host ''
+    Write-Host ('    ' + $cmd)
+    Write-Host ''
+    Write-Host 'Then re-run the report. If your tenant has the admin consent workflow enabled, you can'
+    Write-Host 'request approval from the sign-in prompt instead.'
 }
 
 function Read-ConfigFile {
@@ -102,6 +152,10 @@ function Get-IntuneHousekeeperConfig {
         Every setting is optional and only the ones that have been set are present, so an
         unset value falls through to the command's own default.
 
+        AuthMode is derived from ClientId rather than stored: GraphCommandLineTools when
+        ClientId is Microsoft's well-known ID (set by -UseGraphPowerShellApp), otherwise
+        AppRegistration.
+
     .PARAMETER ConfigPath
         Settings file to read. Defaults to
         %APPDATA%\IntuneHousekeeper\settings.json.
@@ -121,6 +175,7 @@ function Get-IntuneHousekeeperConfig {
     foreach ($name in $script:ConfigSettingNames) {
         $out[$name] = $(if ($stored.ContainsKey($name)) { $stored[$name] } else { $null })
     }
+    $out['AuthMode'] = $(if ($stored.ContainsKey('ClientId')) { Get-AuthMode ([string]$stored['ClientId']) } else { $null })
     return [pscustomobject]$out
 }
 
@@ -137,6 +192,13 @@ function Set-IntuneHousekeeperConfig {
         Nothing secret is stored. The tool signs in through a public client flow, so the
         file holds identifiers and preferences only.
 
+    .PARAMETER UseGraphPowerShellApp
+        Stores Microsoft Graph Command Line Tools as the sign-in app, so later runs try the
+        tool without a registration of your own. Saved as ClientId set to Microsoft's
+        well-known ID rather than as a separate setting. Cannot be combined with -ClientId.
+        To go back, save your own -ClientId, or remove the setting with
+        -RemoveSetting ClientId.
+
     .PARAMETER RemoveSetting
         Names of settings to delete from the file, returning them to their defaults.
 
@@ -151,6 +213,12 @@ function Set-IntuneHousekeeperConfig {
         Set-IntuneHousekeeperConfig -ClientId "<app id>" -TenantId "<tenant id>"
 
         Stores the identifiers, so later runs need no parameters at all.
+
+    .EXAMPLE
+        Set-IntuneHousekeeperConfig -UseGraphPowerShellApp -TenantId "<tenant id>"
+
+        Stores the built-in sign-in app for trying the tool, typically in a test tenant, so
+        later runs need no parameters.
 
     .EXAMPLE
         Set-IntuneHousekeeperConfig -TestNameRegex '(^|[-_ (\[])TEST([-_ )\]]|$)' -OutputFolder 'C:\Reports\Intune'
@@ -175,6 +243,7 @@ function Set-IntuneHousekeeperConfig {
         [string]   $GroupNamePrefix,
         [string[]] $GroupOwnerUpns,
         [string]   $HeaderColor,
+        [switch]   $UseGraphPowerShellApp,
         [string[]] $RemoveSetting,
         [string]   $ConfigPath,
         [switch]   $PassThru
@@ -189,11 +258,22 @@ function Set-IntuneHousekeeperConfig {
     foreach ($bad in ($RemoveSetting | Where-Object { $_ -and ($script:ConfigSettingNames -notcontains $_) })) {
         throw ("'{0}' is not a setting. Valid names: {1}" -f $bad, ($script:ConfigSettingNames -join ', '))
     }
+    # The built-in sign-in app is stored as ClientId, not as a key of its own, so settings
+    # precedence keeps resolving one key at a time. See DESIGN-NOTES.
+    if ($UseGraphPowerShellApp) {
+        if ($PSBoundParameters.ContainsKey('ClientId')) {
+            throw '-UseGraphPowerShellApp and -ClientId both choose the sign-in app. Pass one of them.'
+        }
+        if ($RemoveSetting -contains 'ClientId') {
+            throw '-UseGraphPowerShellApp stores a ClientId and -RemoveSetting ClientId removes it. Pass one of them.'
+        }
+    }
 
     $stored = Read-ConfigFile -Path $ConfigPath
     foreach ($name in $script:ConfigSettingNames) {
         if ($PSBoundParameters.ContainsKey($name)) { $stored[$name] = $PSBoundParameters[$name] }
     }
+    if ($UseGraphPowerShellApp) { $stored['ClientId'] = $script:GraphCommandLineToolsClientId }
     foreach ($name in $RemoveSetting) { if ($stored.ContainsKey($name)) { [void]$stored.Remove($name) } }
 
     $ordered = [ordered]@{}
@@ -717,7 +797,9 @@ function Export-IntuneHousekeeperReport {
         Produces an Excel decision tracker.
 
     .DESCRIPTION
-        Windows scope only. Delegated Graph access through your own Entra app registration.
+        Windows scope only. Delegated Graph access through your own Entra app registration,
+        or, for trying the tool without one, through Microsoft's Graph Command Line Tools
+        app with -UseGraphPowerShellApp.
 
         This script NEVER modifies, unassigns or deletes anything in your tenant. It issues
         GET requests only. A human operator reviews the tracker and makes any change by hand
@@ -787,10 +869,22 @@ function Export-IntuneHousekeeperReport {
 
     .PARAMETER ClientId
         Client ID of your own Entra app registration (public client / native flow enabled).
-        Required, from this parameter or from the settings file.
+        Required unless -UseGraphPowerShellApp is used, from this parameter or from the
+        settings file.
 
     .PARAMETER TenantId
         Directory (tenant) ID. Required, from this parameter or from the settings file.
+
+    .PARAMETER UseGraphPowerShellApp
+        Signs in through Microsoft Graph Command Line Tools, Microsoft's own public client,
+        instead of your own app registration. Meant for trying the tool, typically in a test
+        tenant: nothing has to be registered, but the first run in a tenant needs an
+        administrator who can grant consent (Global Administrator, Privileged Role
+        Administrator, Cloud Application Administrator or Application Administrator) to
+        accept a prompt. An Intune Administrator cannot grant it; when consent is missing,
+        the run prints a command to send to someone who can. For regular use, register your
+        own read-only app: consent to this one is shared by every script run through it.
+        Cannot be combined with -ClientId.
 
     .PARAMETER OutputFolder
         Folder the workbook is written to. Created if missing.
@@ -893,8 +987,16 @@ function Export-IntuneHousekeeperReport {
         Save once, then run with no parameters at all. Anything passed explicitly on a
         later run overrides the stored value for that run only.
 
+    .EXAMPLE
+        Export-IntuneHousekeeperReport -UseGraphPowerShellApp -TenantId "<tenant id>"
+
+        Tries the tool without registering an app, signing in through Microsoft Graph
+        Command Line Tools. The first run in a tenant may ask an administrator to consent to
+        read-only permissions for that app.
+
     .NOTES
-        Required delegated permissions on the app registration, admin-consented:
+        Required delegated permissions, admin-consented on your app registration, or on
+        Microsoft Graph Command Line Tools when -UseGraphPowerShellApp is used:
           DeviceManagementApps.Read.All            applications and their assignments
           DeviceManagementConfiguration.Read.All   profiles, compliance, baselines
           DeviceManagementScripts.Read.All         remediations, platform scripts, and
@@ -926,7 +1028,9 @@ function Export-IntuneHousekeeperReport {
         -Scopes is deliberately not passed to Connect-MgGraph. With a custom -ClientId, MSAL
         treats requested scopes as a new authorization and triggers a consent prompt; the
         token must carry what is already consented on the app registration. The script
-        verifies the granted scopes instead.
+        verifies the granted scopes instead. The one exception is -UseGraphPowerShellApp:
+        nothing is consented on that app for this tool, so the sign-in asks for the scopes
+        the run needs.
 
         Required modules:
           Microsoft.Graph.Authentication
@@ -954,6 +1058,10 @@ function Export-IntuneHousekeeperReport {
         # after the settings merge, with a message naming Set-IntuneHousekeeperConfig.
         [string]   $ClientId,
         [string]   $TenantId,
+
+        # Sign in through Microsoft Graph Command Line Tools instead of an own registration.
+        # Resolved into ClientId after the settings merge, never stored as a key of its own.
+        [switch]   $UseGraphPowerShellApp,
 
         # Settings file to read. Explicit parameters always win over stored values.
         [string]   $ConfigPath,
@@ -1032,9 +1140,27 @@ function Export-IntuneHousekeeperReport {
         }
     }
 
-    if (-not $ClientId -or -not $TenantId) {
-        throw "ClientId and TenantId are required. Pass -ClientId and -TenantId, or save them once with: Set-IntuneHousekeeperConfig -ClientId '<app id>' -TenantId '<tenant id>'. Both are on the Overview page of your app registration in the Entra admin center."
+    # The built-in sign-in path. Resolved after the settings merge on purpose: before it,
+    # the merge loop sees ClientId as unbound and overwrites this with any stored value.
+    # Kept as ClientId rather than a setting of its own, so precedence still resolves one
+    # key at a time and an explicit -ClientId beats a stored built-in choice without
+    # conflict. Only both passed explicitly is an error.
+    if ($UseGraphPowerShellApp) {
+        if ($PSBoundParameters.ContainsKey('ClientId')) {
+            throw '-UseGraphPowerShellApp and -ClientId both choose the sign-in app. Pass one of them.'
+        }
+        $ClientId = $script:GraphCommandLineToolsClientId
     }
+
+    # A missing -ClientId is never read as a request for the built-in app. Which app the
+    # operator consents to must not change because a parameter was forgotten.
+    if (-not $ClientId) {
+        throw "No sign-in app is configured. To try the tool without registering an app, run: Export-IntuneHousekeeperReport -UseGraphPowerShellApp -TenantId '<tenant id>' (the first run in a tenant may need an administrator to accept a consent prompt). For regular use, register your own read-only app as described in the README and save it once with: Set-IntuneHousekeeperConfig -ClientId '<app id>' -TenantId '<tenant id>'. The tenant ID is on the Overview page of Microsoft Entra ID in the Entra admin center."
+    }
+    if (-not $TenantId) {
+        throw "TenantId is required. Pass -TenantId, or save it once with: Set-IntuneHousekeeperConfig -TenantId '<tenant id>'. It is on the Overview page of Microsoft Entra ID in the Entra admin center."
+    }
+    $script:AuthMode = Get-AuthMode $ClientId
 
     # Fail early on a malformed pattern rather than part way through the inventory. An
     # empty -TestNameRegex is valid and means the operator has not supplied a naming
@@ -1069,6 +1195,25 @@ function Export-IntuneHousekeeperReport {
         Write-Warning ("{0} versions of Microsoft.Graph.Authentication are installed ({1}). PowerShell loads by PSModulePath order, not by version. Mixed Graph module versions are the usual cause of sign-in failing with a 'Could not load type ... Microsoft.Identity.Client' error." -f $installedAuth.Count, ($installedAuth -join ', '))
     }
 
+    # The scopes this run needs. Checked against the token after sign-in on both paths, and
+    # on the built-in path requested at sign-in as well. Only what the run uses: asking for a
+    # scope that is not consented blocks an administrator who cannot consent, even when the
+    # run would never use it.
+    $neededScopes = [System.Collections.Generic.List[string]]::new()
+    $neededScopes.Add('DeviceManagementApps.Read.All')
+    $neededScopes.Add('DeviceManagementConfiguration.Read.All')
+    # Remediations and platform scripts sit behind their own permission, and it also
+    # covers the macOS shell and custom attribute scripts read for group references.
+    $neededScopes.Add('DeviceManagementScripts.Read.All')
+    if ($GroupOwnerUpns.Count -gt 0) {
+        $neededScopes.Add('Group.Read.All')
+        $neededScopes.Add('User.Read.All')
+        # Autopilot profiles and enrolment configurations are read only to establish
+        # group references, and they sit behind their own permission. Without it those
+        # reads fail, the reference set is incomplete, and the section refuses to run.
+        $neededScopes.Add('DeviceManagementServiceConfig.Read.All')
+    }
+
     try {
         # Conditional Access token protection (bound tokens) is only satisfied when sign-in
         # goes through the Windows broker (WAM). Current releases of
@@ -1084,9 +1229,25 @@ function Export-IntuneHousekeeperReport {
         # the first was still tearing down. Only a session this script opened is closed
         # again, so a session the operator established stays theirs.
         $existing = Get-MgContext
-        if ($existing -and
+        $sessionMatches = [bool]($existing -and
             ([string]$existing.TenantId -eq [string]$TenantId) -and
-            ([string]$existing.ClientId -eq [string]$ClientId)) {
+            ([string]$existing.ClientId -eq [string]$ClientId))
+
+        # Say which app this run signs in through, on every run and before any prompt. A
+        # stored setting can choose the built-in app, so the operator should see it before
+        # a consent dialog rather than only on RunInfo afterwards. Informational rather
+        # than a warning: warnings in this tool mean something to fix.
+        if ($script:AuthMode -eq 'GraphCommandLineTools') {
+            Write-Host 'Sign-in: Microsoft Graph Command Line Tools (built-in). Suited to trying the tool; for regular use, register your own read-only app as described in the README.'
+            if (-not $sessionMatches) {
+                Write-Host 'The first run in a tenant may ask an administrator to consent to read-only permissions for this Microsoft app. That consent is tenant wide and shared with other scripts that use the app.'
+            }
+        }
+        else {
+            Write-Host 'Sign-in: own app registration.'
+        }
+
+        if ($sessionMatches) {
             $ctx = $existing
             Write-Host ("Reusing the existing Graph session for {0}" -f $ctx.Account)
         }
@@ -1096,9 +1257,17 @@ function Export-IntuneHousekeeperReport {
                 Disconnect-MgGraph | Out-Null
             }
             Write-Host 'Connecting to Microsoft Graph (delegated)...'
-            # Do NOT pass -Scopes here. With a custom -ClientId, MSAL treats requested scopes
-            # as a new authorization and triggers a consent prompt; the token must instead
-            # carry the permissions already consented on the app registration.
+            # With a custom -ClientId, do NOT pass -Scopes. MSAL treats requested scopes as a
+            # new authorization and triggers a consent prompt; the token must instead carry
+            # the permissions already consented on the app registration.
+            #
+            # The built-in app is the opposite case. Nothing is consented on it for this
+            # tool, so without -Scopes the token carries whatever other tooling happened to
+            # consent. It asks for exactly the scopes this run needs. The client ID is passed
+            # explicitly rather than left to the SDK default, so a future change to that
+            # default cannot silently change which app is used.
+            $connectParams = @{ ClientId = $ClientId; TenantId = $TenantId; NoWelcome = $true; ErrorAction = 'Stop' }
+            if ($script:AuthMode -eq 'GraphCommandLineTools') { $connectParams['Scopes'] = [string[]]$neededScopes.ToArray() }
             #
             # One retry, for one specific failure. Observed repeatedly in a tenant
             # enforcing token protection: the first sign-in after a previous run
@@ -1108,13 +1277,13 @@ function Export-IntuneHousekeeperReport {
             # only once, so a sign-in the operator genuinely cancelled is not forced back
             # on them repeatedly.
             try {
-                Connect-MgGraph -ClientId $ClientId -TenantId $TenantId -NoWelcome -ErrorAction Stop
+                Connect-MgGraph @connectParams
             }
             catch {
                 if ([string]$_.Exception.Message -notmatch 'ApplicationCanceled|Current Request already cancelled') { throw }
                 Write-Warning 'The broker cancelled the sign-in request, which usually means it was still closing a previous session. Retrying once.'
                 Start-Sleep -Seconds 3
-                Connect-MgGraph -ClientId $ClientId -TenantId $TenantId -NoWelcome -ErrorAction Stop
+                Connect-MgGraph @connectParams
             }
             $script:ConnectionOwned = $true
             $ctx = Get-MgContext
@@ -1130,20 +1299,6 @@ function Export-IntuneHousekeeperReport {
         # actually run, so they are not reported as missing on an Intune-only run.
         $grantedScopes = @()
         if ($ctx.Scopes) { $grantedScopes = @($ctx.Scopes) }
-        $neededScopes = [System.Collections.Generic.List[string]]::new()
-        $neededScopes.Add('DeviceManagementApps.Read.All')
-        $neededScopes.Add('DeviceManagementConfiguration.Read.All')
-        # Remediations and platform scripts sit behind their own permission, and it also
-        # covers the macOS shell and custom attribute scripts read for group references.
-        $neededScopes.Add('DeviceManagementScripts.Read.All')
-        if ($GroupOwnerUpns.Count -gt 0) {
-            $neededScopes.Add('Group.Read.All')
-            $neededScopes.Add('User.Read.All')
-            # Autopilot profiles and enrolment configurations are read only to establish
-            # group references, and they sit behind their own permission. Without it those
-            # reads fail, the reference set is incomplete, and the section refuses to run.
-            $neededScopes.Add('DeviceManagementServiceConfig.Read.All')
-        }
         $missingScopes = [System.Collections.Generic.List[string]]::new()
         foreach ($needed in $neededScopes) {
             # A ReadWrite grant satisfies the matching Read requirement. The tool only ever
@@ -1163,7 +1318,16 @@ function Export-IntuneHousekeeperReport {
             # token lives on. Asking for the scopes explicitly forces a fresh
             # authorization, which is the one case where -Scopes with a custom client ID
             # is the right thing to do.
-            Write-Warning ("To pick up permissions added since the last sign-in, run once: Connect-MgGraph -ClientId '{0}' -TenantId '{1}' -NoWelcome -Scopes {2}. If the scope is still missing afterwards, close all PowerShell windows and delete %LOCALAPPDATA%\.IdentityService\msal.cache." -f $ClientId, $TenantId, (($neededScopes | ForEach-Object { "'$_'" }) -join ','))
+            $fixCommand = "Connect-MgGraph -ClientId '{0}' -TenantId '{1}' -NoWelcome -Scopes {2}" -f $ClientId, $TenantId, (($neededScopes | ForEach-Object { "'$_'" }) -join ',')
+            if ($script:AuthMode -eq 'GraphCommandLineTools') {
+                # Usually a reused session opened by the operator for other work, with a
+                # narrower scope set. It is theirs, so it is not replaced here.
+                Write-Warning ("This session does not carry every permission this run needs. Run once: {0}, then re-run the report, which reuses that session. If the prompt asks for administrator approval, send an administrator the command below." -f $fixCommand)
+                Write-ConsentHandoff -TenantId $TenantId
+            }
+            else {
+                Write-Warning ("To pick up permissions added since the last sign-in, run once: {0}. If the scope is still missing afterwards, close all PowerShell windows and delete %LOCALAPPDATA%\.IdentityService\msal.cache." -f $fixCommand)
+            }
         }
         # -----------------------------------------------------------------------
         # Inventory - Windows Intune objects
@@ -1344,7 +1508,7 @@ function Export-IntuneHousekeeperReport {
             }
         }
         if (-not $groupReadOk) {
-            Write-Warning 'Entra group analysis skipped: the app registration is missing Group.Read.All (delegated). Add and admin-consent that scope, then re-run to populate the EntraGroups sheet.'
+            Write-Warning 'Entra group analysis skipped: reading group members was refused. The token needs Group.Read.All, and the signed-in account needs a role that can read groups. Check the scopes reported at the start of the run, then re-run to populate the EntraGroups sheet.'
         }
 
         $rowsGroups = New-Object System.Collections.Generic.List[object]
@@ -1405,6 +1569,7 @@ function Export-IntuneHousekeeperReport {
         $runInfo = New-Object System.Collections.Generic.List[object]
         $runInfo.Add([pscustomobject][ordered]@{ Setting='Generated';            Value=(Get-Date -Format 'yyyy-MM-dd HH:mm') })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='Graph endpoint';       Value='beta' })
+        $runInfo.Add([pscustomobject][ordered]@{ Setting='Sign-in';              Value=$(if ($script:AuthMode -eq 'GraphCommandLineTools') { 'Microsoft Graph Command Line Tools (built-in)' } else { 'Own app registration' }) })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='Platform scope';       Value='Windows' })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='TestNameRegex';        Value=$(if ($TestNameRegex) { $TestNameRegex } else { '(not set - test objects not flagged)' }) })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='NewAppGraceMonths';     Value=[string]$NewAppGraceMonths })
@@ -1635,7 +1800,7 @@ function Export-IntuneHousekeeperReport {
         Write-UnrecognisedTypeWarning
 
     if ($script:GraphReadIncomplete) {
-        Write-Warning 'This report is INCOMPLETE. A read failed on an object type the report covers (see the warnings above), so one or more categories are missing objects and their totals understate the estate. A 403 usually means the app registration is missing a permission listed in the README. RunInfo records this on the Collection complete row.'
+        Write-Warning 'This report is INCOMPLETE. A read failed on an object type the report covers (see the warnings above), so one or more categories are missing objects and their totals understate the estate. A 403 means either a permission missing from the token (see the scope check at the start of the run) or a signed-in account whose role cannot read that object type. RunInfo records this on the Collection complete row.'
     }
     elseif ($script:ReferenceReadIncomplete) {
         Write-Warning 'The Windows inventory is complete, but the Entra group section was skipped: a read failed on an object type used only to establish group references. Everything else in this workbook is trustworthy.'
@@ -1657,20 +1822,46 @@ function Export-IntuneHousekeeperReport {
         # Translate the failures that are environmental rather than tenant problems, so the
         # operator is not left reading a .NET type-load error and guessing.
         $likelyCause = ''
+        $showHandoff = $false
+        $builtIn = ($script:AuthMode -eq 'GraphCommandLineTools')
         if ($errMessage -match 'Could not load type|Microsoft\.Identity\.Client|FileLoadException|Could not load file or assembly') {
             $likelyCause = 'Assembly conflict in this PowerShell session. Several side-by-side versions of the Microsoft.Graph modules share one Microsoft.Identity.Client, and Windows PowerShell 5.1 cannot isolate them. Run this in PowerShell 7, which loads the SDK dependencies in an isolated context.'
         }
         elseif ($errMessage -match 'AADSTS530084') {
             $likelyCause = 'Conditional Access token protection rejected the sign-in. The app registration needs the broker redirect URI ms-appx-web://Microsoft.AAD.BrokerPlugin/<client id>, and the device must be joined or registered and compliant.'
         }
-        elseif ($errMessage -match 'ApplicationCanceled|user_canceled|access_denied|Current Request already cancelled') {
-            $likelyCause = 'The sign-in prompt was closed, cancelled, or timed out. Re-run and complete the sign-in. If no prompt appeared, check for a broker window behind the console.'
+        elseif ($errMessage -match 'AADSTS50105') {
+            # Requiring assignment is a common way of restricting the built-in app. The fix
+            # there is not to fight the restriction but to use an own registration.
+            if ($builtIn) { $likelyCause = 'This tenant only lets assigned users sign in to Microsoft Graph Command Line Tools, a common way of restricting it. Use your own app registration instead, as described in the README.' }
+            else          { $likelyCause = 'The app registration requires user assignment and the signed-in account is not assigned. Assign it under Enterprise applications, Users and groups, or turn off Assignment required.' }
         }
-        elseif ($errMessage -match 'AADSTS65001|consent') {
-            $likelyCause = 'The app registration has not been admin-consented for the delegated permissions listed in the README.'
+        elseif ($errMessage -match 'AADSTS53003') {
+            if ($builtIn) { $likelyCause = 'Conditional Access blocked the sign-in. Many tenants block Microsoft Graph Command Line Tools this way. Use your own app registration instead, as described in the README.' }
+            else          { $likelyCause = 'Conditional Access blocked the sign-in. The sign-in logs in the Entra admin center name the policy that applied.' }
+        }
+        elseif ($errMessage -match 'ApplicationCanceled|user[ _]cancel|access_denied|Current Request already cancelled') {
+            $likelyCause = 'The sign-in prompt was closed, cancelled, or timed out. Re-run and complete the sign-in. If no prompt appeared, check for a broker window behind the console.'
+            # Verified in a live tenant: the broker shows 'Need admin approval' in its own
+            # window, and leaving it arrives here as 'User canceled authentication', not as
+            # AADSTS90094. A genuine cancel looks identical, so the built-in path always
+            # points to the handoff and says when it applies.
+            if ($builtIn) {
+                $likelyCause += ' If the prompt said administrator approval is required, see below.'
+                $showHandoff = $true
+            }
+        }
+        elseif ($errMessage -match 'AADSTS90094|AADSTS65001|consent') {
+            if ($builtIn) {
+                $likelyCause = 'Microsoft Graph Command Line Tools has not been granted the permissions this run needs, and the signed-in account cannot grant them.'
+                $showHandoff = $true
+            }
+            else {
+                $likelyCause = 'The app registration has not been admin-consented for the delegated permissions listed in the README.'
+            }
         }
         elseif ($errMessage -match 'Forbidden|403') {
-            $likelyCause = 'The signed-in account or the app registration lacks a required read permission. Check the scopes reported above.'
+            $likelyCause = 'The token lacks a required scope, or the signed-in account cannot read this. If the scopes reported above are all present, the role is the cause: the account needs one that can read Intune, such as Intune Administrator or Global Reader.'
         }
 
         Write-Host ''
@@ -1685,6 +1876,7 @@ function Export-IntuneHousekeeperReport {
         Write-Host ("Stack   :")
         Write-Host ($_.ScriptStackTrace)
         Write-Host '==============================================='
+        if ($showHandoff) { Write-ConsentHandoff -TenantId $TenantId }
     }
     finally {
         if ($script:ConnectionOwned -and (Get-MgContext)) { Disconnect-MgGraph | Out-Null }

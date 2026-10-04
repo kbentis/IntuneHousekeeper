@@ -1,6 +1,6 @@
 @{
     RootModule           = 'IntuneHousekeeper.psm1'
-    ModuleVersion        = '1.0.0'
+    ModuleVersion        = '1.1.0'
     GUID                 = 'b1dd7092-e846-4047-a833-3a9412845814'
     Author               = 'Konstantinos Bentis'
     CompanyName          = 'kbentis.cloud'
@@ -33,7 +33,7 @@
             Tags         = @('Intune', 'MicrosoftGraph', 'Entra', 'Windows', 'Endpoint', 'Reporting', 'Excel', 'ReadOnly')
             LicenseUri   = 'https://github.com/kbentis/IntuneHousekeeper/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/kbentis/IntuneHousekeeper'
-            ReleaseNotes = 'First public release. Read-only Windows Intune inventory producing an Excel worklist of unassigned, mis-assigned and leftover objects, with an optional Entra assignment group check. See CHANGELOG.md in the project repository.'
+            ReleaseNotes = 'Adds -UseGraphPowerShellApp, which signs in through Microsoft Graph Command Line Tools so the tool can be tried without registering an app. The first run in a tenant may need an administrator to accept a consent prompt, and a run that is blocked on consent prints a command to send to someone who can grant it. Your own read-only app registration remains the recommended way to run it in production. See CHANGELOG.md in the project repository.'
         }
     }
 }
