@@ -2,6 +2,25 @@
 
 Notable changes to Intune Housekeeper. Versions follow semantic versioning.
 
+## 1.1.0
+
+The tool can now be tried without registering an app.
+
+- `-UseGraphPowerShellApp` signs in through Microsoft Graph Command Line Tools,
+  Microsoft's own app, instead of your own app registration. The first run in a tenant
+  needs consent from an administrator who can grant it. An Intune Administrator, who
+  cannot, is shown a command to send to someone who can. The choice can be saved with
+  `Set-IntuneHousekeeperConfig` like any other setting.
+- Your own read-only app registration remains the recommended way to run it in
+  production, and with it the tool behaves as before.
+- Each run states which app it signs in through, and RunInfo records it.
+- A sign-in closed or cancelled at the prompt is now explained instead of being reported
+  without a cause.
+- Clearer messages for a sign-in blocked by app assignment or by Conditional Access, and
+  for refused reads, which can come from the account's role as well as from a missing
+  permission.
+- The inventory, flags, priorities, worklist and workbook are unchanged.
+
 ## 1.0.0
 
 First public release.
