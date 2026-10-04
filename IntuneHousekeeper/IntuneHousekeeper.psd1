@@ -1,6 +1,6 @@
 @{
     RootModule           = 'IntuneHousekeeper.psm1'
-    ModuleVersion        = '1.1.0'
+    ModuleVersion        = '1.2.0'
     GUID                 = 'b1dd7092-e846-4047-a833-3a9412845814'
     Author               = 'Konstantinos Bentis'
     CompanyName          = 'kbentis.cloud'
@@ -33,7 +33,7 @@
             Tags         = @('Intune', 'MicrosoftGraph', 'Entra', 'Windows', 'Endpoint', 'Reporting', 'Excel', 'ReadOnly')
             LicenseUri   = 'https://github.com/kbentis/IntuneHousekeeper/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/kbentis/IntuneHousekeeper'
-            ReleaseNotes = 'Adds -UseGraphPowerShellApp, which signs in through Microsoft Graph Command Line Tools so the tool can be tried without registering an app. The first run in a tenant may need an administrator to accept a consent prompt, and a run that is blocked on consent prints a command to send to someone who can grant it. Your own read-only app registration remains the recommended way to run it in production. See CHANGELOG.md in the project repository.'
+            ReleaseNotes = 'Behaviour change: the Entra group section now requires -GroupNamePrefix as well as -GroupOwnerUpns. A run with owners but no prefix used to check every group those accounts own, including Teams, Microsoft 365, Conditional Access and licensing groups; it now skips the section before sign-in, with one warning, and asks for no group permissions. See CHANGELOG.md in the project repository.'
         }
     }
 }

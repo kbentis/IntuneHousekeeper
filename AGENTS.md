@@ -106,6 +106,14 @@ These are not preferences. Breaking any of them breaks the tool.
 - No naming convention ships with a default. `-TestNameRegex` and `-GroupNamePrefix` are
   empty, and the check they drive is skipped and reported as skipped. A default
   convention produces a silent false negative that reads as a clean result.
+- `-GroupOwnerUpns` without `-GroupNamePrefix` skips the Entra group section, decided
+  right after the settings merge and before sign-in, whether the owners came from a
+  parameter or the settings file. A skipped run behaves exactly like one without owners:
+  no group scopes requested or checked, no reference-only endpoints read, one
+  `Write-Warning` naming the missing parameter and nothing more about the section. No
+  fallback: no default prefix, and no "security groups only" mode, which would move the
+  risk onto Conditional Access and licensing groups. A skip is held as a reason and
+  never applied by emptying `$GroupOwnerUpns`, so RunInfo and later messages report why.
 - `$TestNameRegex` must never reach `-match` while empty: an empty pattern matches every
   string and would flag the whole estate.
 - Object types that are neither recognised as Windows nor as another platform are left

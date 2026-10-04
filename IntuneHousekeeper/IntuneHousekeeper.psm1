@@ -912,12 +912,16 @@ function Export-IntuneHousekeeperReport {
         '(^|[-_ ])TEST([-_ ]|$)' for either.
 
     .PARAMETER GroupNamePrefix
-        Restricts the Entra group section to your assignment group naming convention. Empty
-        by default; leaving it empty reports every owned group that matches the flags, which
-        is usually noise.
+        Your assignment group naming convention, for example '<your-prefix>-'. Required for
+        the Entra group section: it is the only signal that a group is an Intune assignment
+        group. With -GroupOwnerUpns set and this empty, the section is skipped before
+        sign-in, with a warning, rather than checking every group the owners hold, including
+        Teams, Microsoft 365, Conditional Access and licensing groups. There is no default.
 
     .PARAMETER GroupOwnerUpns
         Owner accounts whose groups are checked. Empty by default, which skips the section.
+        The section also needs -GroupNamePrefix; with owners and no prefix it is skipped,
+        with a warning.
 
     .PARAMETER HeaderColor
         Worksheet header fill colour.
@@ -952,8 +956,9 @@ function Export-IntuneHousekeeperReport {
 
         Adds the Entra group section. Reports groups owned by those accounts whose names
         start with the prefix and that are either empty or referenced by no Windows Intune
-        assignment. Both parameters are required for the section to run: owner scoping alone
-        would pull in every Teams and Microsoft 365 group the owners happen to hold.
+        assignment. Both parameters are required: with owners and no prefix the section is
+        skipped with a warning, because owner scoping alone would pull in every Teams,
+        Microsoft 365, Conditional Access and licensing group the owners happen to hold.
 
     .EXAMPLE
         Export-IntuneHousekeeperReport -ClientId "<app id>" -TenantId "<tenant id>" `
@@ -1170,6 +1175,29 @@ function Export-IntuneHousekeeperReport {
         catch { throw ("-TestNameRegex is not a valid regular expression: {0}" -f $_.Exception.Message) }
     }
 
+    # The Entra group section needs an owner list AND a naming prefix. The prefix is the
+    # only signal that a group is an Intune assignment group: without it, every Teams,
+    # Microsoft 365, Conditional Access, licensing and app-access group the owners hold
+    # would be checked, and a Conditional Access exclusion group flagged NoAssignmentFound
+    # is exactly the kind of advice that gets someone into trouble. There is no fallback:
+    # no default prefix, and no 'security groups only' filter, which would remove the Teams
+    # noise but move the risk onto Conditional Access and licensing groups, which are
+    # security groups.
+    #
+    # Decided here, before sign-in, so a skipped section costs nothing later: no group
+    # scopes are requested or checked, and no reference-only endpoint is read. The skip is
+    # held in $groupSkip and never applied by emptying $GroupOwnerUpns. An earlier version
+    # did that, and later messages and RunInfo then reported the section as not requested
+    # to an operator who had requested it.
+    $groupSkip = ''
+    if ($GroupOwnerUpns.Count -eq 0) {
+        $groupSkip = 'NotRequested'
+    }
+    elseif (-not $GroupNamePrefix) {
+        $groupSkip = 'NoPrefix'
+        Write-Warning "The Entra group section is skipped: -GroupOwnerUpns is set but -GroupNamePrefix is not. The prefix is the only thing that marks a group as an Intune assignment group; without it, every group those accounts own would be checked, including Teams, Microsoft 365, Conditional Access and licensing groups. Pass it, for example -GroupNamePrefix '<your-prefix>-', or save it once with: Set-IntuneHousekeeperConfig -GroupNamePrefix '<your-prefix>-'"
+    }
+
     # ---------------------------------------------------------------------------
     # Prerequisites and connection
     # ---------------------------------------------------------------------------
@@ -1205,7 +1233,8 @@ function Export-IntuneHousekeeperReport {
     # Remediations and platform scripts sit behind their own permission, and it also
     # covers the macOS shell and custom attribute scripts read for group references.
     $neededScopes.Add('DeviceManagementScripts.Read.All')
-    if ($GroupOwnerUpns.Count -gt 0) {
+    # The group section's own permissions, only when it will run: owners AND a prefix.
+    if (-not $groupSkip) {
         $neededScopes.Add('Group.Read.All')
         $neededScopes.Add('User.Read.All')
         # Autopilot profiles and enrolment configurations are read only to establish
@@ -1460,23 +1489,29 @@ function Export-IntuneHousekeeperReport {
         # The referenced-group set is now fully populated from every object above.
         # -----------------------------------------------------------------------
 
-        if ($GroupOwnerUpns.Count -gt 0) { Add-ReferenceOnlyGroups }
+        if (-not $groupSkip) { Add-ReferenceOnlyGroups }
 
-        Write-Host 'Collecting owner-scoped Entra ID groups...'
-        # One reason, accurate. An earlier version emptied -GroupOwnerUpns to disable the
-        # section, which then reported 'no -GroupOwnerUpns supplied' to an operator who
-        # had supplied it.
-        $groupSkipReason = ''
-        if ($GroupOwnerUpns.Count -eq 0) {
-            $groupSkipReason = 'no -GroupOwnerUpns supplied. Pass the owner accounts whose assignment groups you want checked.'
+        # A failed read is the one skip that can only be decided now. Every skip, whenever
+        # it is decided, goes through $groupSkip, so the console and RunInfo give the same
+        # reason, and $GroupOwnerUpns keeps what the operator supplied.
+        if (-not $groupSkip -and ($script:GraphReadIncomplete -or $script:ReferenceReadIncomplete)) {
+            $groupSkip = 'ReadIncomplete'
         }
-        elseif ($script:GraphReadIncomplete -or $script:ReferenceReadIncomplete) {
-            $groupSkipReason = 'at least one Graph read failed, so the set of referenced groups is incomplete. A group could be reported as unreferenced only because the assignment naming it was never read. Resolve the failure above and re-run.'
-            $GroupOwnerUpns = @()
+        # A missing prefix was reported once, as a warning, before sign-in. Nothing more is
+        # said about the section in that case.
+        if ($groupSkip -ne 'NoPrefix') {
+            Write-Host 'Collecting owner-scoped Entra ID groups...'
+            if ($groupSkip -eq 'NotRequested') {
+                Write-Host '  Skipped: no -GroupOwnerUpns supplied. Pass the owner accounts whose assignment groups you want checked.'
+            }
+            elseif ($groupSkip -eq 'ReadIncomplete') {
+                Write-Host '  Skipped: at least one Graph read failed, so the set of referenced groups is incomplete. A group could be reported as unreferenced only because the assignment naming it was never read. Resolve the failure above and re-run.'
+            }
         }
-        if ($groupSkipReason) { Write-Host ("  Skipped: {0}" -f $groupSkipReason) }
+        $ownersToCheck = @()
+        if (-not $groupSkip) { $ownersToCheck = $GroupOwnerUpns }
         $ownedGroups = @{}
-        foreach ($upn in $GroupOwnerUpns) {
+        foreach ($upn in $ownersToCheck) {
             $u = Invoke-GraphPaged -Uri "https://graph.microsoft.com/v1.0/users?`$filter=userPrincipalName eq '$upn'&`$select=id,userPrincipalName"
             if (@($u).Count -eq 0) { Write-Warning ("Owner account not found: {0}" -f $upn); continue }
             $uid = [string]$u[0].id
@@ -1521,8 +1556,10 @@ function Export-IntuneHousekeeperReport {
             # Only Intune assignment groups are in scope. Owners also hold Teams,
             # M365, and other groups that are not used for assignments, where
             # 'not used in Intune' is meaningless. Filter by naming convention before
-            # any member lookup so those are never reported.
-            if ($GroupNamePrefix -and ([string]$grp.displayName) -notlike ($GroupNamePrefix + '*')) { continue }
+            # any member lookup so those are never reported. The section never runs
+            # without a prefix, but an empty one is still treated as matching nothing
+            # rather than everything, so this line fails closed on its own.
+            if (-not $GroupNamePrefix -or ([string]$grp.displayName) -notlike ($GroupNamePrefix + '*')) { continue }
 
             $memberState = 'unknown'
             try {
@@ -1575,12 +1612,12 @@ function Export-IntuneHousekeeperReport {
         $runInfo.Add([pscustomobject][ordered]@{ Setting='NewAppGraceMonths';     Value=[string]$NewAppGraceMonths })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='RetainedVersionMonths'; Value=$(if ($RetainedVersionMonths -eq 0) { '0 - retained copies not excused' } else { [string]$RetainedVersionMonths }) })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='GroupNamePrefix';      Value=$(if ($GroupNamePrefix) { $GroupNamePrefix } else { '(not set)' }) })
-        $runInfo.Add([pscustomobject][ordered]@{ Setting='Group owners checked'; Value=[string]$GroupOwnerUpns.Count })
+        $runInfo.Add([pscustomobject][ordered]@{ Setting='Group owners checked'; Value=$(if ($groupSkip) { '0' } else { [string]$GroupOwnerUpns.Count }) })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='Settings file';         Value=$(if ($script:ConfigPathUsed -and (Test-Path -LiteralPath $script:ConfigPathUsed)) { $script:ConfigPathUsed } else { '(none - parameters only)' }) })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='PowerShell';            Value=[string]$PSVersionTable.PSVersion })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='Graph auth module';     Value=[string]$script:GraphAuthVersion })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='Collection complete';   Value=$(if ($script:GraphReadIncomplete) { 'No - a read failed on a reported object type' } else { 'Yes' }) })
-        $runInfo.Add([pscustomobject][ordered]@{ Setting='Group references';      Value=$(if ($script:ReferenceReadIncomplete) { 'Incomplete - group section skipped' } elseif ($GroupOwnerUpns.Count -eq 0) { 'Not collected - group section not requested' } else { 'Complete' }) })
+        $runInfo.Add([pscustomobject][ordered]@{ Setting='Group references';      Value=$(if ($groupSkip -eq 'ReadIncomplete') { 'Incomplete - group section skipped' } elseif ($groupSkip -eq 'NoPrefix') { 'Not collected - group section skipped: -GroupNamePrefix not set' } elseif ($groupSkip -eq 'NotRequested') { 'Not collected - group section not requested' } else { 'Complete' }) })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='Actionable means';      Value='High + Medium. Low and Watch are excluded.' })
         $runInfo.Add([pscustomobject][ordered]@{ Setting='Test names matched';    Value=$(if ($TestNameRegex) { ('{0} of {1} object names' -f $script:TestNameMatches, $script:ObjectsExamined) } else { 'detection not enabled' }) })
 
