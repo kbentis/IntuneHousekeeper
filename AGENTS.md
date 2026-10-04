@@ -7,8 +7,9 @@ most of them came from something breaking in a real tenant.
 ## What this is
 
 Intune Housekeeper: a read-only PowerShell module that inventories Windows Intune
-objects via Microsoft Graph and writes an Excel worklist. One exported command,
-`Export-IntuneHousekeeperReport`; everything else in the .psm1 is internal. There is no
+objects via Microsoft Graph and writes an Excel worklist. Three exported commands:
+`Export-IntuneHousekeeperReport`, `Get-IntuneHousekeeperConfig` and
+`Set-IntuneHousekeeperConfig`. Everything else in the .psm1 is internal. There is no
 build step and no test suite, and no dependencies beyond the two modules named in the
 manifest.
 
@@ -54,6 +55,9 @@ These are not preferences. Breaking any of them breaks the tool.
    numbers from a real tenant. Anything site-specific is a parameter that defaults to
    empty or neutral. Where a behaviour exists to accommodate a particular workflow,
    describe the workflow generically and let the operator set the parameter.
+   The one fixed identifier in the code is Microsoft's own: the well-known client ID of
+   Microsoft Graph Command Line Tools, used by `-UseGraphPowerShellApp`. It is the same
+   in every tenant, so it is not a site-specific value and must stay in the code.
 
 5. **Fail closed.** When something is ambiguous, flag it for human review or skip it.
    Never guess in a direction that could cause an object to be deleted. If a permission
@@ -108,6 +112,40 @@ These are not preferences. Breaking any of them breaks the tool.
   out of the report and named in one warning. Do not widen a filter by guessing at
   substrings; add the type to the allow-list or leave it reported as unrecognised.
 
+## Sign-in paths
+
+There are two ways to sign in, and they are deliberately not symmetrical.
+`docs/DESIGN-NOTES.md`, "Signing in without an app registration", has the reasoning.
+
+- An own app registration (a custom `-ClientId`) is the recommended path. The built-in
+  path (`-UseGraphPowerShellApp`, Microsoft Graph Command Line Tools) is for trying the
+  tool. Never make the built-in path the fallback for a missing `-ClientId`: an omitted
+  parameter must not silently change which app the operator consents to.
+- One setting, not two. The switch is stored and resolved as `ClientId` set to the
+  well-known ID, and the mode is derived from the effective client ID. Do not add a
+  separate settings key: precedence is resolved per key, and two mutually exclusive keys
+  cannot be resolved that way.
+- Resolve the switch after the settings merge. Before it, the merge loop sees `ClientId`
+  as unbound and overwrites it with the stored value. Passing both
+  `-UseGraphPowerShellApp` and `-ClientId` explicitly is an error, checked by hand
+  rather than with parameter sets, so the parameter block stays flat.
+- `-Scopes` is never passed with a custom client ID. On the built-in path it is always
+  passed, and contains only the scopes this run needs. The consent handoff block printed
+  on failure always lists all six. These rules look inconsistent and are not: do not
+  align them.
+- `-TenantId` is required on both paths. Do not make it optional on the built-in path:
+  with no tenant, Windows offers the account the device is signed in with, which on a
+  work machine is the production tenant.
+- A matching session the operator opened is reused and never closed. Only a session this
+  run opened is disconnected at the end.
+- RunInfo records the sign-in mode by name only. No client ID or tenant ID is ever
+  written to the workbook.
+- The sign-in mode line is `Write-Host`, not `Write-Warning`. Warnings in this tool mean
+  something to fix, and a deliberate quick-start run is not that.
+- A 403 does not mean a missing scope. Delegated sign-in acts as the signed-in account,
+  so role and scope both apply on either path. Do not write a message that assumes every
+  403 is a permission missing from the registration.
+
 ## Style
 
 - Comment the *why*, not the *what*, especially where behaviour looks wrong but is
@@ -138,3 +176,8 @@ There is no test harness. Before committing:
    ```
    All of this runs in CI on every push.
 4. Ideally, run it against a real tenant. It is read-only, so this is safe.
+5. Changes to sign-in cannot be verified by CI or by stubs alone. Run both paths against
+   a real tenant before release, including one run where the sign-in is cancelled. Any
+   test that matches on a sign-in error message must use text copied from a real run: a
+   hand-written fixture is how the first cancel check passed its test and missed the
+   real message.

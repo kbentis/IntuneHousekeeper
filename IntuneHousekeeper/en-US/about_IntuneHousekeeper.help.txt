@@ -38,11 +38,12 @@ REQUIREMENTS
     The modules Microsoft.Graph.Authentication and ImportExcel, both declared in the
     manifest and installed automatically. Excel itself is not needed.
 
-    Your own Entra app registration, public client / native flow. Under Authentication,
-    Add Redirect URI, Mobile and desktop applications, add both
+    For regular use, your own Entra app registration, public client / native flow. Under
+    Authentication, Add Redirect URI, Mobile and desktop applications, add both
     ms-appx-web://Microsoft.AAD.BrokerPlugin/<client id> and http://localhost. The first
     is required for broker sign-in, which any tenant enforcing Conditional Access token
-    protection needs.
+    protection needs. To try the tool without one, see TRYING IT WITHOUT AN APP
+    REGISTRATION below.
 
     Delegated permissions, admin-consented:
 
@@ -60,8 +61,9 @@ REQUIREMENTS
             'DeviceManagementApps.Read.All','DeviceManagementConfiguration.Read.All', `
             'DeviceManagementScripts.Read.All'
 
-    The module itself never passes -Scopes, because with a custom client ID that triggers
-    a consent prompt. Here the prompt is exactly what is wanted, once.
+    With your own app registration the module never passes -Scopes, because with a
+    custom client ID that triggers a consent prompt. Here the prompt is exactly what is
+    wanted, once.
 
 GETTING STARTED
     Save your settings, then run:
@@ -74,9 +76,26 @@ GETTING STARTED
     over a saved one for that run. Nothing secret is kept there: sign-in uses a public
     client flow, which has no secret.
 
+TRYING IT WITHOUT AN APP REGISTRATION
+    To try the tool, typically in a test tenant, sign in through Microsoft's own
+    Microsoft Graph Command Line Tools app instead of registering one:
+
+        Export-IntuneHousekeeperReport -UseGraphPowerShellApp -TenantId '<tenant id>'
+
+    The report is the same. The first run in a tenant needs consent for that app. A
+    Global Administrator, Privileged Role Administrator, Cloud Application Administrator
+    or Application Administrator sees a consent prompt: tick 'Consent on behalf of your
+    organization' and accept. An Intune Administrator cannot grant consent and sees
+    'Need admin approval'. Close it, and the run prints a command to send to someone who
+    can.
+
+    For regular use, register your own read-only app. Consent to the shared app is
+    tenant wide and serves every script run through it.
+
 THE WORKBOOK
     Summary      totals per category, broken down by priority
-    RunInfo      the settings the run used, and whether collection was complete
+    RunInfo      the settings the run used, the sign-in app, and whether collection
+                 was complete
     Worklist     every actionable object, pre-sorted, with reasons and decision columns
     the rest     read-only inventory per object type
 
@@ -166,6 +185,10 @@ LIMITATIONS
 
     A group with no owner is invisible to the group section, and an abandoned group is
     more likely than most to have lost its owner.
+
+    An account holding an Intune role scoped by scope tags sees only the objects in its
+    scope. The report then looks complete and is not. Run as an Intune Administrator or
+    Global Reader.
 
     macOS, iOS and Android objects are not reported on.
 

@@ -396,10 +396,21 @@ permission rather than trying to force them. If a scope is missing unexpectedly,
 cause is usually a cached session predating a consent change: `Disconnect-MgGraph` and
 re-run.
 
+The one place the module does pass `-Scopes` is the built-in sign-in path described
+under "Signing in without an app registration", and it is the opposite case: that app
+has nothing consented for this tool until it is asked.
+
 The scope check is conditional. `Group.Read.All` and `User.Read.All` are only required
 when `-GroupOwnerUpns` is supplied, so an Intune-only run does not warn about them.
 Warning about permissions a run does not need is the same failure mode as warning
 spam: it trains the operator to ignore warnings.
+
+**A scope in the token is not access.** Delegated sign-in acts as the signed-in account
+on either path, so what a call can read is the token's scope and the account's role
+together. A 403 with the scope present points at the role, and messages must not assume
+every 403 is a permission missing from the registration. Intune RBAC scope tags are
+subtler: they filter rather than fail, so a scoped role produces a report that looks
+complete and is not. See the last section.
 
 The flag is called `NoAssignmentFound`, not `NotUsedInIntune`. Everything else this tool
 reports is a fact read straight off an object: this policy has no assignments, this app
@@ -451,6 +462,124 @@ naming the file and the setting rather than misbehaving later.
 
 ---
 
+## Signing in without an app registration
+
+Registering an app, adding two redirect URIs and granting six permissions is a lot to
+ask of someone who has not yet seen a single row of output, and it is the step most
+likely to stop someone trying the tool in a test tenant. The security argument for a
+dedicated registration is real, but it is an argument about production. So there is a
+second sign-in path, and it is deliberately the second one.
+
+`-UseGraphPowerShellApp` signs in through Microsoft's own public client, well-known
+client ID `14d82eec-204b-4c2f-b7e8-296a70dab67e`, listed under Enterprise applications
+as Microsoft Graph Command Line Tools. It already carries the broker and localhost
+redirect URIs, so broker sign-in and token protection work with nothing configured.
+
+**What goes away is setup, not consent.** For delegated Microsoft Graph permissions,
+consent can be granted by a Global Administrator, Privileged Role Administrator, Cloud
+Application Administrator or Application Administrator. An Intune Administrator cannot
+grant it. That gives the path two audiences with different experiences, and both are
+designed for:
+
+- A consent-capable admin sees one prompt on the first run, ticks "Consent on behalf of
+  your organization", and is done.
+- An Intune Administrator runs straight through if the app is already consented for what
+  the run needs, and is otherwise blocked at sign-in. For them the failure prints a
+  handoff block: one `Connect-MgGraph` command with no `-ClientId`, so it targets the
+  same app, listing all six scopes for an approver to run once. Tenants with the admin
+  consent workflow enabled offer a request button on the prompt instead.
+
+### One setting, not two
+
+The switch is stored and resolved as `ClientId` set to the well-known ID, and the
+sign-in mode is derived from the effective client ID. It is not a second key.
+
+Settings precedence is resolved one key at a time. Two keys that are mutually exclusive
+cannot be resolved that way: an explicit `-ClientId` beside a stored switch would leave
+both set, which is exactly the case that should not conflict. With one key the existing
+rules apply unchanged, and anyone already passing the well-known ID by hand gets the
+right behaviour. It also keeps older versions sane: a 1.0.0 install reading such a file
+connects to the same app without `-Scopes`, which works if the app is consented and
+produces the usual missing-scope warnings if not.
+
+The switch is resolved after the settings merge, not before. Before it, the merge loop
+sees `ClientId` as unbound and overwrites it with the stored value. Passing both
+`-UseGraphPowerShellApp` and `-ClientId` explicitly is an error, checked by hand rather
+than with parameter sets, which would split the syntax shown by `-?` for the sake of one
+exclusion.
+
+### Why this path passes -Scopes
+
+The rule in the authentication section stands: with a custom client ID, `-Scopes` is a
+new authorization and a consent prompt. This app is the opposite case. Nothing is
+configured on it for this tool, so a sign-in without `-Scopes` carries whatever other
+tooling happened to consent, which may or may not include what this run needs.
+
+The request contains only the scopes the run needs: the three Intune scopes, plus the
+three for the group section when `-GroupOwnerUpns` is set. Asking for a scope that is
+not consented is harmless for an admin who can consent, because they see a prompt, and
+fatal for one who cannot, because sign-in fails, even when the run would never use that
+scope. Consent to this app accumulates ad hoc, so a tenant holding five of the six is an
+ordinary state rather than an edge case.
+
+The handoff block is the opposite: it always lists all six. It is run once by somebody
+doing a favour, and asking them a second time when the group section is switched on is
+where a trial ends.
+
+Requesting fewer scopes does not make the token least-privilege. An access token carries
+every scope consented for that client, and in a working tenant this app has often
+accumulated ReadWrite across the directory. The tool only issues GET, so nothing breaks,
+but it is the main reason this path is not the recommendation.
+
+### -TenantId stays required
+
+An earlier draft made `-TenantId` optional on this path, to save a trial user one
+lookup: the signed-in account would decide the tenant. Testing ended that. With no
+tenant, Windows offered the account the device is signed in with, which on a work
+machine is the production tenant. A path meant for test tenants that can land in
+production because a parameter was left out is the wrong trade for a tool whose point is
+being safe to run on a whim, and the lookup is one copy from the Entra admin center.
+
+Keeping it required also kept the session reuse rule exactly as it was: tenant and
+client ID must both match.
+
+### Why it is not the recommendation
+
+Consent to this app is tenant wide and shared by every script anyone runs through it.
+Read-only stops being a property of the registration and becomes a property of this
+tool's code, which is weaker. The README keeps the dedicated read-only registration as
+the way to run this in production, and this path as the way to try it.
+
+Hardened tenants often restrict the app, either by requiring assignment (`AADSTS50105`)
+or through Conditional Access (`AADSTS53003`). Both are translated into a message
+pointing at the own-app path, since that is the fix, rather than left as a generic
+sign-in failure.
+
+The mode is printed on every run and recorded on RunInfo by name only. The client ID is
+never written there, so RunInfo stays safe to share. The line is informational rather
+than a warning: warnings in this tool mean something to fix, and a deliberate
+quick-start run is not that.
+
+A session this tool opened is still closed at the end. On this path that clears the
+cached token for the app the admin uses for other work, so their next unrelated Graph
+session starts with a fresh sign-in. That is kept for predictability and to match the
+own-app path. A session that was reused is left alone, as before.
+
+### What a blocked sign-in looks like
+
+Verified in a live tenant: an Intune Administrator sees "Need admin approval" in the
+broker window, and leaving it reaches the module as "User canceled authentication", not
+as `AADSTS90094`. A genuine cancel produces the same message, so on this path every
+cancellation prints the handoff block, with wording that says when it applies. The
+one-shot `ApplicationCanceled` retry does not match that message, so the approval screen
+is shown once.
+
+The first version of the cancel check matched `user_canceled` and missed the real
+message entirely, because the test that covered it used an error string written by hand.
+Fixtures for sign-in errors should be copied from a real run.
+
+---
+
 ## Scoping the Entra group check
 
 The group section only reports groups that are **owned by a listed account** and
@@ -476,6 +605,14 @@ convention will never be reported.
   resolution of every referenced group ID and is the most valuable thing to add next.
 - **Evaluate assignment filters.** An object assigned through a filter that matches
   nothing is reported as healthy. Same class of blind spot as the one above.
+- **Detect an operator whose Intune role is scoped.** Scope tags filter what Graph
+  returns rather than refusing it, so an administrator holding a scoped Intune role gets
+  a report that looks complete. The group section is the dangerous part: a group whose
+  assignments live on objects outside the operator's scope comes back as
+  `NoAssignmentFound`. Detecting it means reading Intune role assignments, which is a
+  seventh permission (`DeviceManagementRBAC.Read.All`), and that is a decision rather
+  than a patch. Until then, run as an Intune Administrator (the Entra role, which is
+  unscoped) or a Global Reader.
 - **Detect a wrongly scoped object with a conventional name.** There is no metadata
   signal for intent beyond a naming convention.
 - **Remember decisions between cycles.** Deliberate. A "keep" decision six months ago

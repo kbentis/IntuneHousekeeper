@@ -65,7 +65,8 @@ without notice.
   manifest and installed automatically. ImportExcel writes the workbook itself, so Excel
   does not need to be installed. See the note on the Excel dependency below before
   deploying this in a commercial environment.
-- An Entra app registration, described below.
+- An Entra app registration, described below. Optional while you are trying the tool:
+  see [Try it without an app registration](#try-it-without-an-app-registration).
 
 ### Why PowerShell 7 and not 5.1
 
@@ -76,8 +77,8 @@ that has accumulated several `Microsoft.Graph.*` module versions ends up with on
 
 ### App registration
 
-Register your own app rather than consenting broad scopes to the shared Microsoft Graph
-PowerShell app.
+For regular use, register your own app rather than consenting broad scopes to the shared
+Microsoft Graph Command Line Tools app.
 
 1. **App registrations > New registration.** Single tenant. No redirect URI is needed at
    this stage.
@@ -160,6 +161,45 @@ Files obtained with `git clone` are never marked, and neither are files installe
 `Install-Module`. If `Get-ExecutionPolicy -List` shows `AllSigned`, that is a different
 matter: nothing unsigned will load regardless of origin, and this module is not signed.
 
+## Try it without an app registration
+
+To try the tool, typically in a test tenant, you can skip the app registration and sign
+in through Microsoft's own app, Microsoft Graph Command Line Tools:
+
+```powershell
+Export-IntuneHousekeeperReport -UseGraphPowerShellApp -TenantId "<tenant id>"
+```
+
+The tenant ID is on the Overview page of Microsoft Entra ID in the Entra admin center.
+The report is exactly the same as with your own registration.
+
+The first run in a tenant needs consent for that app. What you see depends on your role:
+
+- **Global Administrator, Privileged Role Administrator, Cloud Application Administrator
+  or Application Administrator:** a consent prompt listing read-only Intune permissions.
+  Tick **Consent on behalf of your organization** and accept. Nobody in the tenant is
+  asked again.
+- **Intune Administrator:** **Need admin approval**, because this role cannot grant
+  consent. Close the prompt, and the run prints a command to send to someone in one of
+  the roles above. Once they have run it, your runs go straight through.
+
+If the app is already consented in your tenant, there is no prompt at all. To save the
+choice rather than retype it:
+
+```powershell
+Set-IntuneHousekeeperConfig -UseGraphPowerShellApp -TenantId "<tenant id>"
+Export-IntuneHousekeeperReport
+```
+
+**This is for trying the tool, not for production.** Consent to Microsoft Graph Command
+Line Tools is tenant wide and shared by every script anyone runs through it, so its
+token often carries far more than this tool needs, ReadWrite included. The tool still
+only issues GET, but with a dedicated read-only registration nothing the token carries
+could change your tenant in the first place. Many hardened tenants restrict the shared
+app by requiring assignment or block it with Conditional Access; the run recognises both
+and points you to your own registration. Every run prints which app it signs in through,
+and RunInfo records it.
+
 ## Usage
 
 ```powershell
@@ -194,14 +234,15 @@ on the command line always wins for that run without changing what is saved. A s
 or `""` is a real setting, not an absent one: `"NewAppGraceMonths": 0` means no grace
 window, while the key being missing means use the default.
 
-`ClientId` and `TenantId` are the only required values, from either source. Without them
-the command stops with a message telling you how to save them, rather than prompting.
+`TenantId` is always required, and so is `ClientId` unless you use
+`-UseGraphPowerShellApp`, from either source. Without them the command stops with a
+message telling you how to start, rather than prompting.
 
 The settings file holds no credential, but it does hold your tenant ID, client ID and naming conventions, which identify your organisation.
 The settings.json file is in .gitignore for that reason.
 
 The module exports three commands. `Get-Help Export-IntuneHousekeeperReport -Examples`
-prints eight worked examples, and `Get-Help about_IntuneHousekeeper` covers setup,
+prints nine worked examples, and `Get-Help about_IntuneHousekeeper` covers setup,
 priorities, flags and limitations in one place.
 
 If you connect to Graph yourself first, the command reuses that session and leaves it
@@ -214,17 +255,19 @@ existing directories and quotes paths containing spaces. `-TestNameRegex` offers
 common naming conventions, already single-quoted, which matters because a pattern like
 `-TEST$` breaks if you put it in double quotes.
 
-`Get-Help Export-IntuneHousekeeperReport -Examples` prints eight worked examples, and
+`Get-Help Export-IntuneHousekeeperReport -Examples` prints nine worked examples, and
 `-?` prints the full parameter list. Running the command with nothing saved and no
-parameters stops with a message naming `Set-IntuneHousekeeperConfig` and telling you
-where in the Entra portal to find the two values it needs.
+parameters stops with a message showing both ways to start: the command for trying it
+without an app registration, and `Set-IntuneHousekeeperConfig` for your own, with where
+in the Entra admin center to find the values.
 
 ### Parameters
 
 | Parameter | Default | Purpose |
 |---|---|---|
-| `-ClientId` | required | App registration client ID. From this parameter or the settings file |
+| `-ClientId` | required, unless `-UseGraphPowerShellApp` | App registration client ID. From this parameter or the settings file |
 | `-TenantId` | required | Tenant ID. From this parameter or the settings file |
+| `-UseGraphPowerShellApp` | off | Sign in through Microsoft Graph Command Line Tools instead of your own app registration. For trying the tool; see [Try it without an app registration](#try-it-without-an-app-registration). Cannot be combined with `-ClientId` |
 | `-ConfigPath` | `%APPDATA%\IntuneHousekeeper\settings.json` | Settings file to read |
 | `-OutputFolder` | `~\Documents` | Where the workbook is written |
 | `-NewAppGraceMonths` | `6` | Unassigned apps created within this many months are parked as `Watch`. `0` flags every unassigned app. Range 0-120 |
@@ -246,11 +289,11 @@ One workbook, `Intune-Housekeeper_<timestamp>.xlsx`. Two sheets matter:
 
 ![The Summary sheet: one row per category with totals broken down into High, Medium, Low, Watch, Healthy and Actionable columns](docs/images/summary.png)
 
-**RunInfo** records the settings the run used, so a workbook can be read months later
-without guessing which checks were switched on. It holds no tenant or account
-identifiers and is safe to share.
+**RunInfo** records the settings the run used, including which app it signed in through,
+so a workbook can be read months later without guessing which checks were switched on.
+It holds no tenant or account identifiers and is safe to share.
 
-![The RunInfo sheet: generated timestamp, Graph endpoint, platform scope, the test-name pattern, grace and retention windows, group prefix, settings file path, PowerShell and Graph module versions, and whether collection was complete](docs/images/runinfo.png)
+![The RunInfo sheet: generated timestamp, Graph endpoint, sign-in app, platform scope, the test-name pattern, grace and retention windows, group prefix, settings file path, PowerShell and Graph module versions, and whether collection was complete](docs/images/runinfo.png)
 
 The remaining sheets are read-only inventory per object type.
 
@@ -391,6 +434,10 @@ of age.
   required.
 - A **wrongly scoped object with a conventional name** cannot be detected. Naming is the
   only signal of intent.
+- An account holding an Intune role **scoped by scope tags** sees only the objects in
+  its scope, and Graph returns the rest as if they did not exist. The report then looks
+  complete and is not, and the group section can report a group as unreferenced when its
+  assignments sit outside that scope. Run as an Intune Administrator or Global Reader.
 - Detection of test objects and of assignment groups both depend on **naming
   conventions** you supply. Anything that deviates is invisible, and if you supply
   nothing, that check does not run at all.
@@ -438,9 +485,10 @@ Connect-MgGraph -ClientId "<app id>" -TenantId "<tenant id>" -NoWelcome -Scopes 
 Drop the last three if you do not use the group section. The run itself tells you which
 scopes it wants and prints the exact command to fix a missing one.
 
-Then run the report in the same session; it reuses that connection. The module itself
-never passes `-Scopes`, because with a custom client ID MSAL treats it as a new
-authorization and prompts for consent. Here that prompt is exactly what you want, once.
+Then run the report in the same session; it reuses that connection. With your own app
+registration the module never passes `-Scopes`, because with a custom client ID MSAL
+treats it as a new authorization and prompts for consent. Here that prompt is exactly
+what you want, once.
 
 If the scope is still missing afterwards, close every PowerShell window and delete
 `%LOCALAPPDATA%\.IdentityService\msal.cache`.
